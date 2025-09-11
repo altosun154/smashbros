@@ -7,7 +7,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Smash Bracket maker", page_icon="🎮", layout="wide")
 
-st.title("🎮 Smash Bracket")
+st.title("🎮 Smash Bros Bracket Maker")
 st.markdown(
     """
     Use the **sidebar** to add players, set **characters per player**, pick a **Rule Set**, then
