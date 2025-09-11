@@ -1,4 +1,4 @@
-# app.py — Smash Bracket (No Self-Match) with Auto Player Slots + Auto-Fill Characters
+# app.py — Smash Bracket with Rule Sets: Regular / 1st pick / Groups
 import streamlit as st
 import random
 from dataclasses import dataclass
@@ -10,12 +10,8 @@ st.set_page_config(page_title="Smash Bracket (No Self-Match)", page_icon="🎮",
 st.title("🎮 Smash Bracket — No Self-Match in Round 1")
 st.markdown(
     """
-    Build a **first-round bracket** where **no player's characters face each other**.
-
-    1) In the **sidebar**, enter player names and how many characters per player.  
-    2) Click **Auto-Create/Reset Entries** to make the slots.  
-    3) Click **🎲 Auto-fill Characters** to automatically set names like **Character 1, Character 2, ...** per player.  
-    4) Press **Generate Bracket**.
+    Use the **sidebar** to add players, set **characters per player**, pick a **Rule Set**, then
+    **Auto-Create/Reset Entries** and **Auto-fill Characters**. Generate a round-1 bracket with constraints.
     """
 )
 
@@ -23,11 +19,17 @@ st.markdown(
 class Entry:
     player: str
     character: str
+    slot: int  # per-player slot index (1 = first pick)
 
 # ---------- Pairing Utilities ----------
-def recursive_pairing(entries: List[Entry]) -> Optional[List[Tuple[Entry, Entry]]]:
-    """Backtracking perfect matching that avoids same-player pairings.
-    Returns list of pairs or None if impossible."""
+def recursive_pairing(entries: List[Entry], rule: str) -> Optional[List[Tuple[Entry, Entry]]]:
+    """
+    Backtracking perfect matching that avoids forbidden pairings.
+    - Always forbids same-player in round 1.
+    - If rule == 'first_pick': also forbids Slot==1 vs Slot==1 across different players.
+    - BYE can match anyone.
+    Returns list of pairs or None if impossible.
+    """
     n = len(entries)
     if n == 0:
         return []
@@ -35,35 +37,95 @@ def recursive_pairing(entries: List[Entry]) -> Optional[List[Tuple[Entry, Entry]
     for i in range(1, n):
         b = entries[i]
         # Allow BYE to match anyone
-        if a.player != b.player or "BYE" in (a.character.upper(), b.character.upper()):
+        if "BYE" in (a.character.upper(), b.character.upper()):
             remaining = entries[1:i] + entries[i+1:]
-            rest = recursive_pairing(remaining)
+            rest = recursive_pairing(remaining, rule)
             if rest is not None:
                 return [(a, b)] + rest
+            continue
+
+        # Base rule: no same player
+        if a.player == b.player:
+            continue
+
+        # 1st pick rule: don't pair Slot 1 vs Slot 1
+        if rule == "first_pick" and a.slot == 1 and b.slot == 1:
+            continue
+
+        remaining = entries[1:i] + entries[i+1:]
+        rest = recursive_pairing(remaining, rule)
+        if rest is not None:
+            return [(a, b)] + rest
     return None
 
-def generate_bracket(raw_entries: List[Entry], shuffle_seed: Optional[int] = None):
+def generate_bracket_regular_or_firstpick(raw_entries: List[Entry], shuffle_seed: Optional[int], rule: str):
     entries = raw_entries.copy()
-    # If odd, add a BYE that can match anyone
+    # If odd, add BYE that can match anyone
     if len(entries) % 2 == 1:
-        entries.append(Entry(player="SYSTEM", character="BYE"))
+        entries.append(Entry(player="SYSTEM", character="BYE", slot=0))
     rng = random.Random(shuffle_seed)
     # Try multiple shuffles to find a valid matching quickly
-    for _ in range(200):
+    for _ in range(300):
         rng.shuffle(entries)
-        result = recursive_pairing(entries)
+        result = recursive_pairing(entries, rule)
         if result is not None:
             # Randomize within-pair order for fairness
-            result2 = []
+            out = []
             for a, b in result:
                 if rng.random() < 0.5:
-                    result2.append((b, a))
+                    out.append((b, a))
                 else:
-                    result2.append((a, b))
-            return result2
+                    out.append((a, b))
+            return out
     return None
 
-# ---------- Sidebar: Players, Slots, Optional Pool & Auto-Fill ----------
+def generate_bracket_groups(raw_entries: List[Entry], shuffle_seed: Optional[int]):
+    """
+    'Groups' rule: create a seed order in round-robin by player so each player's entries
+    are spaced by at least (#players) positions. Then pair neighbors into matches.
+    """
+    entries = raw_entries.copy()
+    rng = random.Random(shuffle_seed)
+
+    # Group entries by player and sort each player's entries by slot (1..k)
+    by_player = {}
+    for e in entries:
+        by_player.setdefault(e.player, []).append(e)
+    players = list(by_player.keys())
+    # Keep SYSTEM/BYE out of players
+    players = [p for p in players if p != "SYSTEM"]
+    rng.shuffle(players)  # randomize player order for fairness
+
+    for p in players:
+        by_player[p].sort(key=lambda x: x.slot)
+
+    # Build round-robin seed order: for slot i, append all players' i-th entries
+    seed_order: List[Entry] = []
+    max_k = max((len(by_player[p]) for p in players), default=0)
+    for i in range(max_k):
+        round_entries = []
+        for p in players:
+            if i < len(by_player[p]):
+                round_entries.append(by_player[p][i])
+        rng.shuffle(round_entries)  # small shuffle inside each ring
+        seed_order.extend(round_entries)
+
+    # Add BYE if odd
+    if len(seed_order) % 2 == 1:
+        seed_order.append(Entry(player="SYSTEM", character="BYE", slot=0))
+
+    # Pair neighbors
+    bracket = []
+    for i in range(0, len(seed_order), 2):
+        a, b = seed_order[i], seed_order[i+1]
+        # If a and b end up same player (rare but guard), swap b with the next if possible
+        if a.player == b.player and i + 2 < len(seed_order):
+            seed_order[i+1], seed_order[i+2] = seed_order[i+2], seed_order[i+1]
+            b = seed_order[i+1]
+        bracket.append((a, b))
+    return bracket
+
+# ---------- Sidebar: Players, Slots, Rule Set ----------
 with st.sidebar:
     st.header("Players")
     default_players = "You\nFriend1\nFriend2"
@@ -71,78 +133,114 @@ with st.sidebar:
         "Enter player names (one per line)",
         value=st.session_state.get("players_multiline", default_players),
         height=140,
-        help="These names will appear in the Player dropdown."
+        help="These names populate the Player dropdown."
     )
     players = [p.strip() for p in players_multiline.splitlines() if p.strip()]
     st.session_state["players_multiline"] = players_multiline
 
     st.divider()
-    st.header("Characters per person")
+    st.header("Characters per player")
     chars_per_person = st.number_input(
-        "How many characters per player?",
+        "How many per player?",
         min_value=1, max_value=50, value=2, step=1
     )
 
-    st.caption("Click **Auto-Create/Reset Entries** to generate rows for everyone.")
-    auto_pool = st.text_area(
-        "Optional: Character pool (comma-separated; will be assigned round-robin)",
-        value="",
-        placeholder="Mario, Link, Kirby, Fox, Samus, Pikachu, Jigglypuff, Ness, Captain Falcon"
+    st.divider()
+    st.header("Rule Set")
+    rule = st.selectbox(
+        "Choose rule",
+        options=["regular", "first_pick", "groups"],
+        index=0,
+        help=(
+            "regular: no self-match in round 1\n"
+            "first_pick: also prevents Slot 1 vs Slot 1 in round 1\n"
+            "groups: seeds by round-robin so same player's slots are spaced by #players"
+        )
     )
 
-    seed = st.number_input("Shuffle seed (optional)", value=0,
-                           help="Set for reproducible shuffles, or leave 0 to be random.")
-    clean_rows = st.checkbox("Remove empty rows", value=True)
-    st.caption("Tip: If one player owns more than half of all entries, a valid bracket may be impossible.")
-
+    st.divider()
+    st.subheader("Build / Fill")
+    auto_pool = st.text_area(
+        "Optional character pool (comma-separated) — used when building",
+        value="",
+        placeholder="Mario, Link, Kirby, Fox, Samus, Pikachu, Jigglypuff"
+    )
     build_clicked = st.button("⚙️ Auto-Create/Reset Entries", use_container_width=True)
 
-    st.divider()
-    st.subheader("Auto-fill Characters")
-    shuffle_within_player = st.checkbox("Shuffle numbers within each player's slots", value=True,
-                                        help="If on: the order of 'Character 1..k' is randomized per player.")
-    auto_fill_clicked = st.button("🎲 Auto-fill Characters", use_container_width=True)
+    shuffle_within_player = st.checkbox("Shuffle numbers within each player's slots (for auto-fill)", value=True)
+    auto_fill_clicked = st.button("🎲 Auto-fill Characters (Character 1..k)", use_container_width=True)
 
-# ---------- Builders ----------
+    st.divider()
+    st.header("General")
+    seed = st.number_input("Shuffle seed (optional)", value=0, help="Set for reproducible results; 0 = random.")
+    clean_rows = st.checkbox("Remove empty rows", value=True)
+    st.caption("Tip: If one player owns more than half of all entries, a valid no-self-match bracket may be impossible.")
+
+# ---------- Helpers ----------
 def build_entries_df(players: List[str], k: int, pool: List[str]) -> pd.DataFrame:
     rows = []
     pool_idx = 0
-    for i in range(k):
+    for i in range(1, k + 1):         # slot = 1..k
         for p in players:
             if pool and pool_idx < len(pool):
                 ch = pool[pool_idx].strip()
                 pool_idx += 1
             else:
-                ch = ""  # leave empty for manual fill or auto-fill button
-            rows.append({"Player": p, "Character": ch})
+                ch = ""  # leave empty for auto-fill or manual edit
+            rows.append({"Player": p, "Character": ch, "Slot": i})
     return pd.DataFrame(rows)
 
 def auto_fill_characters(df: pd.DataFrame, players: List[str], k: int, shuffle_each: bool) -> pd.DataFrame:
-    # For each player, set that player's rows' Character to "Character 1..k"
     out = df.copy()
+    # Make sure each player's entries have Slot values 1..n (reassign to be safe)
+    out = assign_slots(out)
     for p in players:
         mask = (out["Player"] == p)
         idxs = list(out.index[mask])
-        # Ensure we only number up to the count of that player's rows
-        count = len(idxs)
-        labels = [f"Character {i+1}" for i in range(min(k, count))]
-        # If player has more than k rows (manual adds), extend numbering
-        if count > k:
-            labels = [f"Character {i+1}" for i in range(count)]
+        # sort by Slot to have Character 1..k line up with Slot 1..k
+        idxs.sort(key=lambda i: int(out.at[i, "Slot"]) if str(out.at[i, "Slot"]).isdigit() else 9999)
+        labels = [f"Character {i+1}" for i in range(len(idxs))]
         if shuffle_each:
             random.shuffle(labels)
         for row_i, label in zip(idxs, labels):
             out.at[row_i, "Character"] = label
     return out
 
+def assign_slots(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure each player's rows have Slot = 1..n based on current order.
+    Useful if the table was edited.
+    """
+    out = df.copy()
+    out["Slot"] = pd.to_numeric(out.get("Slot", 0), errors="coerce").fillna(0).astype(int)
+    for p, grp in out.groupby("Player", sort=False):
+        # keep order stable as displayed
+        idxs = list(grp.index)
+        for j, idx in enumerate(idxs, start=1):
+            out.at[idx, "Slot"] = j
+    return out
+
+def df_to_entries(df: pd.DataFrame, clean_rows_flag: bool) -> List[Entry]:
+    df2 = assign_slots(df)
+    entries: List[Entry] = []
+    for _, row in df2.iterrows():
+        pl = str(row.get("Player", "")).strip()
+        ch = str(row.get("Character", "")).strip()
+        sl = int(row.get("Slot", 0))
+        if clean_rows_flag and (not pl or not ch):
+            continue
+        if pl and ch:
+            entries.append(Entry(player=pl, character=ch, slot=sl))
+    return entries
+
 # ---------- State: Entries Table ----------
 if "table_df" not in st.session_state:
     st.session_state.table_df = pd.DataFrame([
-        {"Player": "You", "Character": "Mario"},
-        {"Player": "You", "Character": "Link"},
-        {"Player": "Friend1", "Character": "Kirby"},
-        {"Player": "Friend1", "Character": "Fox"},
-        {"Player": "Friend2", "Character": "Samus"},
+        {"Player": "You", "Character": "Mario", "Slot": 1},
+        {"Player": "You", "Character": "Link", "Slot": 2},
+        {"Player": "Friend1", "Character": "Kirby", "Slot": 1},
+        {"Player": "Friend1", "Character": "Fox", "Slot": 2},
+        {"Player": "Friend2", "Character": "Samus", "Slot": 1},
     ])
 
 # Build/reset from sidebar
@@ -153,7 +251,7 @@ if build_clicked:
         pool_list = [x for x in [s.strip() for s in auto_pool.split(",")] if x] if auto_pool.strip() else []
         st.session_state.table_df = build_entries_df(players, int(chars_per_person), pool_list)
 
-# Auto-fill characters button
+# Auto-fill characters
 if auto_fill_clicked:
     if not players:
         st.warning("Add players first.")
@@ -162,14 +260,14 @@ if auto_fill_clicked:
             st.session_state.table_df, players, int(chars_per_person), shuffle_within_player
         )
 
-# Keep Player values aligned with current players (if provided)
+# Normalize Player values if players list exists
 if players:
     def normalize_player(p):
         p = str(p).strip()
         return p if p in players else (players[0] if p == "" else "")
     st.session_state.table_df["Player"] = st.session_state.table_df["Player"].map(normalize_player)
 
-# ---------- Main: Entries Table & Quick Add ----------
+# ---------- Main: Entries Editor ----------
 st.subheader("Entries")
 
 with st.container():
@@ -181,37 +279,31 @@ with st.container():
     with c3:
         if st.button("➕ Add Entry", use_container_width=True, disabled=(not players or not add_char.strip())):
             if players and add_char.strip():
-                new_row = {"Player": add_player, "Character": add_char.strip()}
-                st.session_state.table_df = pd.concat([st.session_state.table_df, pd.DataFrame([new_row])], ignore_index=True)
+                # Compute next slot for that player
+                df = assign_slots(st.session_state.table_df)
+                next_slot = 1
+                if not df.empty:
+                    existing_for_player = df[df["Player"] == add_player]
+                    if not existing_for_player.empty:
+                        next_slot = int(existing_for_player["Slot"].max()) + 1
+                new_row = {"Player": add_player, "Character": add_char.strip(), "Slot": next_slot}
+                st.session_state.table_df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
 
 table_df = st.data_editor(
     st.session_state.table_df,
     num_rows="dynamic",
     use_container_width=True,
     column_config={
-        "Player": st.column_config.SelectboxColumn(
-            "Player",
-            options=players if players else [],
-            required=True
-        ),
+        "Player": st.column_config.SelectboxColumn("Player", options=players if players else [], required=True),
         "Character": st.column_config.TextColumn(required=True),
+        "Slot": st.column_config.NumberColumn("Slot", min_value=1, step=1, help="Per-player slot (1 = first pick)"),
     },
     key="table_editor",
 )
 
-def df_to_entries(df: pd.DataFrame) -> List[Entry]:
-    entries = []
-    for _, row in df.iterrows():
-        pl = str(row.get("Player", "")).strip()
-        ch = str(row.get("Character", "")).strip()
-        if clean_rows and (not pl or not ch):
-            continue
-        if pl and ch:
-            entries.append(Entry(player=pl, character=ch))
-    return entries
+entries = df_to_entries(table_df, clean_rows_flag=clean_rows)
 
-entries = df_to_entries(table_df)
-
+# ---------- Generate Bracket ----------
 st.divider()
 col_gen, col_clear = st.columns([2, 1])
 
@@ -221,45 +313,46 @@ with col_gen:
             st.error("Add at least 2 entries (characters).")
         else:
             use_seed = None if seed == 0 else int(seed)
-            bracket = generate_bracket(entries, shuffle_seed=use_seed)
+            if rule in ("regular", "first_pick"):
+                bracket = generate_bracket_regular_or_firstpick(entries, use_seed, rule)
+            else:  # groups
+                bracket = generate_bracket_groups(entries, use_seed)
+
             if bracket is None:
-                st.error("Couldn't build a bracket without self-matches. Try balancing counts across players or keep an odd total to allow a BYE.")
+                st.error("Couldn't build a valid round-1 bracket with those constraints. Try balancing counts or allowing a BYE (odd total).")
             else:
-                st.success("Bracket generated!")
+                st.success(f"Bracket generated using rule: {rule}")
                 out_lines = []
                 for i, (a, b) in enumerate(bracket, start=1):
-                    out_lines.append(f"Match {i}: {a.character} ({a.player})  vs  {b.character} ({b.player})")
+                    out_lines.append(f"Match {i}: {a.character} ({a.player}, Slot {a.slot})  vs  {b.character} ({b.player}, Slot {b.slot})")
                 st.code("\n".join(out_lines), language="text")
 
                 # CSV download
                 import io, csv
                 buffer = io.StringIO()
                 writer = csv.writer(buffer)
-                writer.writerow(["Match", "Player A", "Character A", "Player B", "Character B"])
+                writer.writerow(["Match", "Player A", "Character A", "Slot A", "Player B", "Character B", "Slot B"])
                 for i, (a, b) in enumerate(bracket, start=1):
-                    writer.writerow([i, a.player, a.character, b.player, b.character])
+                    writer.writerow([i, a.player, a.character, a.slot, b.player, b.character, b.slot])
                 st.download_button(
                     label="⬇️ Download bracket as CSV",
                     data=buffer.getvalue().encode("utf-8"),
-                    file_name="smash_bracket_round1.csv",
+                    file_name=f"smash_bracket_round1_{rule}.csv",
                     mime="text/csv",
                 )
 
 with col_clear:
     if st.button("🧹 Clear Table"):
-        st.session_state.table_df = pd.DataFrame(columns=["Player", "Character"])
+        st.session_state.table_df = pd.DataFrame(columns=["Player", "Character", "Slot"])
         st.rerun()
 
 st.divider()
 st.markdown(
     """
-    **Notes**
-    - Use the **sidebar** to set **players** and **characters per player**; click **Auto-Create/Reset Entries**.
-    - Click **🎲 Auto-fill Characters** to auto-name each player's slots (e.g., *Character 1..k*), with optional shuffle per player.
-    - You can also paste a **character pool**; the reset button assigns them round-robin across players.
-    - If you have an **odd number** of characters, the app adds a **BYE** so no one fights themselves.
-    - If one player has **more than half** the total characters, a valid no-self-match bracket may be **impossible**.
-    - Use the **seed** setting for a reproducible shuffle.
+    **Rule Set details**
+    - **regular**: random bracket; forbids **same-player** matches in Round 1.
+    - **first_pick**: same as regular **plus** forbids **Slot 1 vs Slot 1** in Round 1.
+    - **groups**: seeds by round-robin (**1..k across players**) so same player's entries are spaced by **#players** in the seed order; then pairs neighbors.
     """
 )
 st.caption("Made with ❤️ for quick living-room brackets.")
