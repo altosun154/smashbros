@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 import pandas as pd
 
-st.set_page_config(page_title="Smash Bracket (No Self-Match)", page_icon="🎮", layout="wide")
+st.set_page_config(page_title="Smash Bracket maker", page_icon="🎮", layout="wide")
 
 st.title("🎮 Smash Bracket — No Self-Match in Round 1")
 st.markdown(
