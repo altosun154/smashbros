@@ -1,4 +1,4 @@
-# app.py — Smash Bracket with Rule Sets: regular / first_pick / groups / everything
+# app.py — Smash Bracket with Rule Sets: regular / first_pick / groups / everything (no seed)
 import streamlit as st
 import random
 from dataclasses import dataclass
@@ -57,35 +57,34 @@ def recursive_pairing(entries: List[Entry], rule: str) -> Optional[List[Tuple[En
             return [(a, b)] + rest
     return None
 
-def generate_bracket_regular_or_firstpick(raw_entries: List[Entry], shuffle_seed: Optional[int], rule: str):
+def generate_bracket_regular_or_firstpick(raw_entries: List[Entry], rule: str):
     entries = raw_entries.copy()
     if len(entries) % 2 == 1:
         entries.append(Entry(player="SYSTEM", character="BYE", slot=0))
-    rng = random.Random(shuffle_seed)
+    # Try multiple shuffles to find a valid matching quickly
     for _ in range(400):
-        rng.shuffle(entries)
+        random.shuffle(entries)
         result = recursive_pairing(entries, rule)
         if result is not None:
             # Randomize within-pair order for fairness
             out = []
             for a, b in result:
-                if rng.random() < 0.5:
+                if random.random() < 0.5:
                     out.append((b, a))
                 else:
                     out.append((a, b))
             return out
     return None
 
-def seed_round_robin_by_player(entries: List[Entry], shuffle_seed: Optional[int]) -> List[Entry]:
+def seed_round_robin_by_player(entries: List[Entry]) -> List[Entry]:
     """Round-robin seed: players spaced by #players using per-player slot order."""
-    rng = random.Random(shuffle_seed)
     by_player = {}
     for e in entries:
         if e.player == "SYSTEM":
             continue
         by_player.setdefault(e.player, []).append(e)
     players = list(by_player.keys())
-    rng.shuffle(players)  # randomize player order for fairness
+    random.shuffle(players)  # randomize player order for fairness
     for p in players:
         by_player[p].sort(key=lambda x: x.slot)
 
@@ -93,7 +92,7 @@ def seed_round_robin_by_player(entries: List[Entry], shuffle_seed: Optional[int]
     max_k = max((len(by_player[p]) for p in players), default=0)
     for i in range(max_k):
         ring = [by_player[p][i] for p in players if i < len(by_player[p])]
-        rng.shuffle(ring)  # small shuffle inside each ring
+        random.shuffle(ring)  # small shuffle inside each ring
         seed_order.extend(ring)
     return seed_order
 
@@ -114,10 +113,10 @@ def pair_neighbors_with_guards(seed_order: List[Entry], enforce_first_pick_guard
         i += 2
     return bracket
 
-def generate_bracket_groups(raw_entries: List[Entry], shuffle_seed: Optional[int], enforce_first_pick_guard: bool):
+def generate_bracket_groups(raw_entries: List[Entry], enforce_first_pick_guard: bool):
     """Groups (and Everything) seeding -> neighbor pairing with guards."""
     entries = raw_entries.copy()
-    seed_order = seed_round_robin_by_player(entries, shuffle_seed)
+    seed_order = seed_round_robin_by_player(entries)
     if len(seed_order) % 2 == 1:
         seed_order.append(Entry(player="SYSTEM", character="BYE", slot=0))
     return pair_neighbors_with_guards(seed_order, enforce_first_pick_guard=enforce_first_pick_guard)
@@ -162,7 +161,6 @@ with st.sidebar:
 
     st.divider()
     st.header("General")
-    seed = st.number_input("Shuffle seed (optional)", value=0, help="Set for reproducible results; 0 = random.")
     clean_rows = st.checkbox("Remove empty rows", value=True)
     st.caption("Tip: If one player owns more than half of all entries, a valid no-self-match bracket may be impossible.")
 
@@ -299,13 +297,12 @@ with col_gen:
         if len(entries) < 2:
             st.error("Add at least 2 entries (characters).")
         else:
-            use_seed = None if seed == 0 else int(seed)
             if rule in ("regular", "first_pick"):
-                bracket = generate_bracket_regular_or_firstpick(entries, use_seed, rule)
+                bracket = generate_bracket_regular_or_firstpick(entries, rule)
             elif rule == "groups":
-                bracket = generate_bracket_groups(entries, use_seed, enforce_first_pick_guard=False)
+                bracket = generate_bracket_groups(entries, enforce_first_pick_guard=False)
             else:  # everything
-                bracket = generate_bracket_groups(entries, use_seed, enforce_first_pick_guard=True)
+                bracket = generate_bracket_groups(entries, enforce_first_pick_guard=True)
 
             if bracket is None:
                 st.error("Couldn't build a valid round-1 bracket with those constraints. Try balancing counts or allowing a BYE (odd total).")
@@ -345,4 +342,3 @@ st.markdown(
     - **everything**: **groups** seeding **+** forbids **Slot 1 vs Slot 1** when pairing.
     """
 )
-st.caption("Made with ❤️ for quick living-room brackets.")
