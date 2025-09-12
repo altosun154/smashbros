@@ -1,4 +1,4 @@
-# app.py — Smash Bracket with Rule Sets: regular / first_pick / groups / everything (fixed groups/everything)
+# app.py — Smash Bracket with Rule Sets: regular / first_pick / groups / everything (everything keeps groups spacing)
 import streamlit as st
 import random
 from dataclasses import dataclass
@@ -21,14 +21,8 @@ class Entry:
     character: str
     slot: int  # per-player slot index (1 = first pick)
 
-# ---------- Pairing utilities for 'regular' / 'first_pick' ----------
+# ---------- Pairing for 'regular' / 'first_pick' ----------
 def recursive_pairing(entries: List[Entry], rule: str) -> Optional[List[Tuple[Entry, Entry]]]:
-    """
-    Backtracking perfect matching that avoids forbidden pairings.
-    - Always forbids same-player in round 1.
-    - If rule == 'first_pick': also forbids Slot==1 vs Slot==1 across different players.
-    - BYE can match anyone.
-    """
     n = len(entries)
     if n == 0:
         return []
@@ -42,15 +36,12 @@ def recursive_pairing(entries: List[Entry], rule: str) -> Optional[List[Tuple[En
             if rest is not None:
                 return [(a, b)] + rest
             continue
-
         # Base rule: no same-player
         if a.player == b.player:
             continue
-
         # 1st pick protection
         if rule == "first_pick" and a.slot == 1 and b.slot == 1:
             continue
-
         remaining = entries[1:i] + entries[i+1:]
         rest = recursive_pairing(remaining, rule)
         if rest is not None:
@@ -61,12 +52,10 @@ def generate_bracket_regular_or_firstpick(raw_entries: List[Entry], rule: str):
     entries = raw_entries.copy()
     if len(entries) % 2 == 1:
         entries.append(Entry(player="SYSTEM", character="BYE", slot=0))
-    # Try multiple shuffles to find a valid matching quickly
     for _ in range(400):
         random.shuffle(entries)
         result = recursive_pairing(entries, rule)
         if result is not None:
-            # Randomize within-pair order for fairness
             out = []
             for a, b in result:
                 if random.random() < 0.5:
@@ -76,21 +65,21 @@ def generate_bracket_regular_or_firstpick(raw_entries: List[Entry], rule: str):
             return out
     return None
 
-# ---------- Round-robin seeding helpers for 'groups' / 'everything' ----------
+# ---------- Round-robin seeding helpers (used by groups/everything) ----------
 def players_from_entries(entries: List[Entry]) -> List[str]:
     seen = []
     for e in entries:
         if e.player != "SYSTEM" and e.player not in seen:
             seen.append(e.player)
-    # one-time shuffle for fairness; order then stays fixed across rings
-    random.shuffle(seen)
+    random.shuffle(seen)  # one-time shuffle of player order for fairness
     return seen
 
-def build_rings(entries: List[Entry]) -> List[List[Entry]]:
+def build_rings(entries: List[Entry]) -> Tuple[List[List[Entry]], List[str]]:
     """
-    Build rings by slot: ring[0] = all Slot 1 entries in fixed player order,
-    ring[1] = all Slot 2 entries in same order, etc.
-    No shuffle inside rings -> guarantees spacing by #players across the seed order.
+    Build rings by slot with fixed player order:
+      ring[0] = all Slot 1 entries in player order,
+      ring[1] = all Slot 2 entries in same order, etc.
+    No shuffling inside rings -> guarantees spacing by #players across the seed order.
     """
     by_player_slot = {}
     max_slot = 0
@@ -105,7 +94,6 @@ def build_rings(entries: List[Entry]) -> List[List[Entry]]:
     for s in range(1, max_slot + 1):
         ring = []
         for p in p_order:
-            # each (player, slot) should have exactly one entry; if missing, skip
             es = by_player_slot.get((p, s), [])
             if es:
                 ring.append(es[0])
@@ -113,104 +101,86 @@ def build_rings(entries: List[Entry]) -> List[List[Entry]]:
     return rings, p_order
 
 def pair_within_ring(ring: List[Entry], carry: Optional[Entry]) -> Tuple[List[Tuple[Entry, Entry]], Optional[Entry]]:
-    """
-    Pair consecutive entries inside a ring. If ring size is odd, one entry is carried to the next step.
-    If a 'carry' from previous ring exists, pair it with the first item of this ring (players are different
-    since order is fixed and rings are same players in same order).
-    """
     pairs: List[Tuple[Entry, Entry]] = []
     items = ring.copy()
 
     if carry is not None:
-        # pair carry with first item from this ring
         first = items.pop(0) if items else None
         if first is None:
-            # nothing to pair, carry forward
             return pairs, carry
-        # carry might be SYSTEM/BYE; it's allowed to match anyone
         if carry.player == first.player and carry.player != "SYSTEM":
-            # rotate by one to avoid same-player (very rare in fixed order, but safe)
             if items:
                 first, items[0] = items[0], first
         pairs.append((carry, first))
         carry = None
 
-    # pair remaining consecutive
     i = 0
     while i + 1 < len(items):
         a, b = items[i], items[i+1]
-        if a.player == b.player:
-            # rotate next item forward to avoid same-player; safe because ring has unique players
-            if i + 2 < len(items):
-                items[i+1], items[i+2] = items[i+2], items[i+1]
-                b = items[i+1]
+        if a.player == b.player and i + 2 < len(items):
+            items[i+1], items[i+2] = items[i+2], items[i+1]
+            b = items[i+1]
         pairs.append((a, b))
         i += 2
 
-    # if one leftover, become carry
     leftover = items[i] if i < len(items) else None
     if leftover is not None:
         carry = leftover
 
     return pairs, carry
 
-def pair_ring_pairs(ring_a: List[Entry], ring_b: List[Entry]) -> List[Tuple[Entry, Entry]]:
-    """
-    Pair entries from ring A vs ring B with a +1 index offset so the same player never faces themselves.
-    This also ensures Slot 1 never faces Slot 1 (used by 'everything' for ring0 vs ring1).
-    """
-    pairs: List[Tuple[Entry, Entry]] = []
-    n = min(len(ring_a), len(ring_b))
-    P = n
-    for j in range(n):
-        a = ring_a[j]
-        b = ring_b[(j + 1) % P]  # +1 offset breaks same-player index alignment
-        # guard (shouldn't happen with +1 offset and unique players)
-        if a.player == b.player and a.player != "SYSTEM":
-            # fallback: use +2 offset if needed
-            b = ring_b[(j + 2) % P]
-        pairs.append((a, b))
-    # If rings sizes differ (shouldn't in normal use), any extras will be handled later as carry/BYE.
-    return pairs
-
 def generate_bracket_groups(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
-    """
-    Groups rule:
-      - Fixed player order per ring (no intra-ring shuffle) => spacing by #players.
-      - Pair within each ring; if odd players, carry one forward.
-    """
     rings, _ = build_rings(entries)
     pairs: List[Tuple[Entry, Entry]] = []
     carry: Optional[Entry] = None
-
     for ring in rings:
         ring_pairs, carry = pair_within_ring(ring, carry)
         pairs.extend(ring_pairs)
-
-    # handle leftover
     if carry is not None:
-        # pair leftover with BYE
         pairs.append((carry, Entry(player="SYSTEM", character="BYE", slot=0)))
-
     return pairs
 
+# ---------- EVERYTHING: keep groups spacing + avoid Slot1 vs Slot1 ----------
 def generate_bracket_everything(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
     """
-    Everything rule:
-      - Same spacing guarantee as Groups (fixed player order).
-      - Pair ring0 vs ring1 (offset +1), ring2 vs ring3 (offset +1), ...
-      - If odd #rings, last ring is paired internally (like Groups).
+    Keep the exact Groups seed order (rings concatenated, no intra-ring shuffles)
+    to preserve spacing: each player's slots are ≥ #players apart.
+    Then pair across rings:
+      - ring0 vs ring1 with +1 offset,
+      - ring2 vs ring3 with +1 offset,
+      - ...
+    Leftover ring (odd #rings) is paired internally like Groups.
     """
-    rings, _ = build_rings(entries)
+    rings, p_order = build_rings(entries)
+    P = len(p_order)
+
     pairs: List[Tuple[Entry, Entry]] = []
     i = 0
     while i + 1 < len(rings):
         ring_a, ring_b = rings[i], rings[i+1]
-        # same players, same order; +1 offset prevents same-player and avoids Slot1 vs Slot1
-        pairs.extend(pair_ring_pairs(ring_a, ring_b))
+        nA, nB = len(ring_a), len(ring_b)
+        n = min(nA, nB)
+        if n == 0:
+            i += 2
+            continue
+        # +1 offset in ring_b breaks same-player alignment and avoids Slot1 vs Slot1
+        for j in range(n):
+            a = ring_a[j]
+            b = ring_b[(j + 1) % nB]
+            if a.player == b.player and a.player != "SYSTEM":
+                # fallback offset +2 if collision (should be rare)
+                b = ring_b[(j + 2) % nB] if nB > 1 else Entry("SYSTEM", "BYE", 0)
+            pairs.append((a, b))
+        # If ring sizes differ, carry extras as BYEs
+        if nA > n:
+            for k in range(n, nA):
+                pairs.append((ring_a[k], Entry("SYSTEM", "BYE", 0)))
+        if nB > n:
+            for k in range(n, nB):
+                pairs.append((Entry("SYSTEM", "BYE", 0), ring_b[k]))
         i += 2
 
-    if i < len(rings):  # one ring left (odd number of rings)
+    if i < len(rings):  # leftover ring
         tail_pairs, carry = pair_within_ring(rings[i], carry=None)
         pairs.extend(tail_pairs)
         if carry is not None:
@@ -244,8 +214,8 @@ with st.sidebar:
         help=(
             "regular: no self-match in round 1\n"
             "first_pick: regular + forbids Slot 1 vs Slot 1\n"
-            "groups: fixed round-robin seeding; a player's entries are spaced by #players\n"
-            "everything: groups spacing + pair ring0 vs ring1 (offset) to avoid Slot1 vs Slot1"
+            "groups: fixed round-robin seeding; a player's entries are spaced by #players (seed order kept)\n"
+            "everything: same spacing as groups + pairs ring0 vs ring1 (offset), ring2 vs ring3, ... to avoid Slot1 vs Slot1"
         )
     )
 
@@ -269,7 +239,6 @@ def assign_slots(df: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(out["Slot"], pd.Series):
         out["Slot"] = pd.Series([0] * len(out), index=out.index)
     out["Slot"] = pd.to_numeric(out["Slot"], errors="coerce").fillna(0).astype(int)
-
     if "Player" not in out.columns:
         out["Player"] = ""
     for p, grp in out.groupby("Player", sort=False, dropna=False):
@@ -435,8 +404,8 @@ st.markdown(
     **Rule Set details**
     - **regular**: random bracket; forbids **same-player** matches in Round 1.
     - **first_pick**: regular **+** forbids **Slot 1 vs Slot 1** in Round 1.
-    - **groups**: fixed round-robin seeding; a player's entries are spaced by **#players**; pair within each ring.
-    - **everything**: **groups** spacing **+** pair ring0 vs ring1 (offset), ring2 vs ring3, ... to avoid **Slot 1 vs Slot 1** and same-player.
+    - **groups**: fixed round-robin seeding (rings); a player's entries are spaced by **#players**; pairs within each ring.
+    - **everything**: uses the **same seed order as groups** (keeps spacing) and pairs **ring0 vs ring1** (+1 offset), **ring2 vs ring3**, ... to avoid **Slot 1 vs Slot 1** and same-player.
     """
 )
 st.caption("Made with ❤️ for quick living-room brackets.")
