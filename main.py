@@ -1,4 +1,4 @@
-# app.py — Smash Bracket with Rule Sets: regular / first_pick / groups / everything (everything keeps groups spacing)
+# app.py — Smash Bracket with Rule Sets: regular / first_pick / groups / everything (groups-first, then targeted Slot1 fix)
 import streamlit as st
 import random
 from dataclasses import dataclass
@@ -140,53 +140,87 @@ def generate_bracket_groups(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
         pairs.append((carry, Entry(player="SYSTEM", character="BYE", slot=0)))
     return pairs
 
-# ---------- EVERYTHING: keep groups spacing + avoid Slot1 vs Slot1 ----------
+# ---------- EVERYTHING: groups first, then targeted Slot-1 fix ----------
+def fix_first_pick_conflicts(bracket: List[Tuple[Entry, Entry]]) -> List[Tuple[Entry, Entry]]:
+    """
+    For any match where both sides are Slot 1 (different players),
+    swap one Slot-1 with a non-Slot-1 from the SAME player, but only if that other match's opponent is not Slot-1.
+    Keep trying up to a few passes.
+    """
+    def is_slot1(e: Entry) -> bool:
+        return e.slot == 1 and e.player != "SYSTEM"
+
+    def safe_swap_ok(a_entry: Entry, a_opp: Entry, b_entry: Entry, b_opp: Entry) -> bool:
+        # After swapping a_entry with b_entry, ensure no same-player clashes are created.
+        return (a_entry.player != b_opp.player) and (b_entry.player != a_opp.player)
+
+    for _ in range(5):  # a few cleanup passes
+        changed = False
+        # Build quick index for a player's appearances
+        appearances = {}  # player -> list of (match_idx, side, entry, opp)
+        for idx, (x, y) in enumerate(bracket):
+            appearances.setdefault(x.player, []).append((idx, "A", x, y))
+            appearances.setdefault(y.player, []).append((idx, "B", y, x))
+
+        # Find conflicts
+        conflicts = [i for i, (x, y) in enumerate(bracket) if is_slot1(x) and is_slot1(y) and x.player != y.player]
+        if not conflicts:
+            break
+
+        for i in conflicts:
+            a, b = bracket[i]  # both slot 1
+            # try to fix by swapping 'a' (slot1) with another of a.player
+            fixed_here = False
+            for (j, side, entry, opp) in appearances.get(a.player, []):
+                if j == i:
+                    continue
+                # need a non-slot1 entry and its opponent not slot1
+                if entry.slot != 1 and not is_slot1(opp):
+                    # check safe to swap: 'entry' would face b. 'a' would face 'opp'
+                    if safe_swap_ok(entry, opp, a, b):
+                        # do the swap
+                        if side == "A":
+                            # swap bracket[i].A with bracket[j].A
+                            bracket[i] = (entry, b)
+                            bracket[j] = (a, bracket[j][1])
+                        else:
+                            bracket[i] = (entry, b)
+                            bracket[j] = (bracket[j][0], a)
+                        changed = True
+                        fixed_here = True
+                        break
+            if fixed_here:
+                continue
+            # try fixing by swapping 'b' instead
+            for (j, side, entry, opp) in appearances.get(b.player, []):
+                if j == i:
+                    continue
+                if entry.slot != 1 and not is_slot1(opp):
+                    if safe_swap_ok(entry, opp, b, a):
+                        if side == "A":
+                            bracket[i] = (a, entry)
+                            bracket[j] = (b, bracket[j][1])
+                        else:
+                            bracket[i] = (a, entry)
+                            bracket[j] = (bracket[j][0], b)
+                        changed = True
+                        fixed_here = True
+                        break
+            # if neither side could be fixed, leave as-is for this pass
+
+        if not changed:
+            break
+    return bracket
+
 def generate_bracket_everything(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
     """
-    Keep the exact Groups seed order (rings concatenated, no intra-ring shuffles)
-    to preserve spacing: each player's slots are ≥ #players apart.
-    Then pair across rings:
-      - ring0 vs ring1 with +1 offset,
-      - ring2 vs ring3 with +1 offset,
-      - ...
-    Leftover ring (odd #rings) is paired internally like Groups.
+    1) Build bracket with **Groups** (keeps spacing by #players).
+    2) Post-process: for any Slot1 vs Slot1 match, swap that Slot1 with a non-Slot1 from the same player
+       whose opponent is also not Slot1. This avoids Slot1 vs Slot1 without breaking spacing or causing self-matches.
     """
-    rings, p_order = build_rings(entries)
-    P = len(p_order)
-
-    pairs: List[Tuple[Entry, Entry]] = []
-    i = 0
-    while i + 1 < len(rings):
-        ring_a, ring_b = rings[i], rings[i+1]
-        nA, nB = len(ring_a), len(ring_b)
-        n = min(nA, nB)
-        if n == 0:
-            i += 2
-            continue
-        # +1 offset in ring_b breaks same-player alignment and avoids Slot1 vs Slot1
-        for j in range(n):
-            a = ring_a[j]
-            b = ring_b[(j + 1) % nB]
-            if a.player == b.player and a.player != "SYSTEM":
-                # fallback offset +2 if collision (should be rare)
-                b = ring_b[(j + 2) % nB] if nB > 1 else Entry("SYSTEM", "BYE", 0)
-            pairs.append((a, b))
-        # If ring sizes differ, carry extras as BYEs
-        if nA > n:
-            for k in range(n, nA):
-                pairs.append((ring_a[k], Entry("SYSTEM", "BYE", 0)))
-        if nB > n:
-            for k in range(n, nB):
-                pairs.append((Entry("SYSTEM", "BYE", 0), ring_b[k]))
-        i += 2
-
-    if i < len(rings):  # leftover ring
-        tail_pairs, carry = pair_within_ring(rings[i], carry=None)
-        pairs.extend(tail_pairs)
-        if carry is not None:
-            pairs.append((carry, Entry(player="SYSTEM", character="BYE", slot=0)))
-
-    return pairs
+    base = generate_bracket_groups(entries)
+    fixed = fix_first_pick_conflicts(base)
+    return fixed
 
 # ---------- Sidebar ----------
 with st.sidebar:
@@ -214,8 +248,8 @@ with st.sidebar:
         help=(
             "regular: no self-match in round 1\n"
             "first_pick: regular + forbids Slot 1 vs Slot 1\n"
-            "groups: fixed round-robin seeding; a player's entries are spaced by #players (seed order kept)\n"
-            "everything: same spacing as groups + pairs ring0 vs ring1 (offset), ring2 vs ring3, ... to avoid Slot1 vs Slot1"
+            "groups: fixed round-robin seeding; a player's entries are spaced by #players\n"
+            "everything: groups first, then swap away any Slot1-vs-Slot1 by trading with a same-player non-Slot1 whose opponent isn't Slot1"
         )
     )
 
@@ -404,8 +438,7 @@ st.markdown(
     **Rule Set details**
     - **regular**: random bracket; forbids **same-player** matches in Round 1.
     - **first_pick**: regular **+** forbids **Slot 1 vs Slot 1** in Round 1.
-    - **groups**: fixed round-robin seeding (rings); a player's entries are spaced by **#players**; pairs within each ring.
-    - **everything**: uses the **same seed order as groups** (keeps spacing) and pairs **ring0 vs ring1** (+1 offset), **ring2 vs ring3**, ... to avoid **Slot 1 vs Slot 1** and same-player.
+    - **groups**: fixed round-robin seeding; a player's entries are spaced by **#players**; pairs within each ring.
+    - **everything**: **groups first**, then if any **Slot1 vs Slot1**, swap that Slot1 with a **non-Slot1** from the same player whose opponent is **not** Slot1.
     """
 )
-st.caption("Made with ❤️ for quick living-room brackets.")
