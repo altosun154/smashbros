@@ -1,8 +1,8 @@
-# app.py — Smash Bracket: regular / first_pick / groups / everything (more randomness, spacing preserved)
+# app.py — Smash Bracket: regular / first_pick / groups (balanced-random tallies) / everything
 import streamlit as st
 import random
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 import pandas as pd
 
 st.set_page_config(page_title="Smash Bracket (No Self-Match)", page_icon="🎮", layout="wide")
@@ -65,168 +65,164 @@ def generate_bracket_regular_or_firstpick(raw_entries: List[Entry], rule: str):
             return out
     return None
 
-# ---------- Round-robin seeding helpers (used by groups/everything) ----------
+# ---------- Balanced-random "Groups" using tallies ----------
 def players_from_entries(entries: List[Entry]) -> List[str]:
-    """Get unique players and randomize their global order once per run."""
     seen = []
     for e in entries:
         if e.player != "SYSTEM" and e.player not in seen:
             seen.append(e.player)
-    random.shuffle(seen)  # one-time global shuffle
+    random.shuffle(seen)  # one-time global shuffle for variety
     return seen
 
 def build_rings(entries: List[Entry]) -> Tuple[List[List[Entry]], List[str]]:
-    """
-    Build rings by slot with fixed player order:
-      ring[0] = all Slot 1 entries in player order,
-      ring[1] = all Slot 2 entries in the SAME order, etc.
-    Keeping the same order across rings guarantees spacing by #players.
-    """
-    by_player_slot = {}
+    """ring[0]=all Slot1 entries (one per player), ring[1]=all Slot2, ..."""
+    by_player_slot: Dict[Tuple[str,int], Entry] = {}
     max_slot = 0
     for e in entries:
         if e.player == "SYSTEM":
             continue
-        by_player_slot.setdefault((e.player, e.slot), []).append(e)
+        by_player_slot[(e.player, e.slot)] = e
         max_slot = max(max_slot, e.slot)
 
     p_order = players_from_entries(entries)
     rings: List[List[Entry]] = []
     for s in range(1, max_slot + 1):
-        ring = []
-        for p in p_order:
-            es = by_player_slot.get((p, s), [])
-            if es:
-                ring.append(es[0])
+        ring = [by_player_slot[(p, s)] for p in p_order if (p, s) in by_player_slot]
         rings.append(ring)
     return rings, p_order
 
-# ---- Groups pairing with alternating parity for more variety (spacing preserved) ----
-def pair_within_ring_alternating(ring: List[Entry], start_parity: int, carry: Optional[Entry]) -> Tuple[List[Tuple[Entry, Entry]], Optional[Entry]]:
+def pick_from_lowest_tally(candidates: List[Entry], tally: Dict[str, int], exclude_player: Optional[str] = None) -> Optional[Entry]:
+    pool = [e for e in candidates if e.player != exclude_player]
+    if not pool:
+        return None
+    min_t = min(tally.get(e.player, 0) for e in pool)
+    lowest = [e for e in pool if tally.get(e.player, 0) == min_t]
+    return random.choice(lowest)
+
+def pair_ring_balanced_random(ring: List[Entry], tally: Dict[str, int], carry: Optional[Entry]) -> Tuple[List[Tuple[Entry, Entry]], Optional[Entry]]:
     """
-    Pair neighbors in ring using starting parity 0 or 1:
-      parity=0 -> pairs (0,1),(2,3),...
-      parity=1 -> pairs (1,2),(3,4),... (wrap the last with 0 if needed)
-    Carry, if present, pairs with the first eligible element.
+    Pair entries inside this ring using the tally rule:
+      - choose first fighter among lowest-tally players at random
+      - choose opponent among remaining lowest-tally players at random
+    Carry (from an odd previous ring) is paired first.
     """
     pairs: List[Tuple[Entry, Entry]] = []
     items = ring.copy()
 
-    # If there's a carry from the previous ring, pair it with the first item (rotate once if needed)
-    if carry is not None and items:
-        if carry.player == items[0].player and carry.player != "SYSTEM" and len(items) > 1:
-            # rotate one step to avoid same-player clash
-            items = items[1:] + items[:1]
-        pairs.append((carry, items[0]))
-        items = items[1:]
+    # If there's a carry from previous ring, pair it with a lowest-tally opponent
+    if carry is not None:
+        opp = pick_from_lowest_tally(items, tally, exclude_player=carry.player)
+        if opp is None:
+            # no opponent -> keep carrying
+            return pairs, carry
+        items.remove(opp)
+        pairs.append((carry, opp))
+        tally[carry.player] = tally.get(carry.player, 0) + 1
+        tally[opp.player] = tally.get(opp.player, 0) + 1
         carry = None
 
-    n = len(items)
-    if n == 0:
-        return pairs, carry
-    if n == 1:
-        # nothing to pair with -> becomes new carry
-        return pairs, items[0]
-
-    # Build index order based on parity
-    idxs = list(range(n))
-    if start_parity % 2 == 1:
-        idxs = idxs[1:] + idxs[:1]  # shift by 1
-
-    i = 0
-    while i + 1 < len(idxs):
-        a = items[idxs[i]]
-        b = items[idxs[i+1]]
-        if a.player == b.player and len(idxs) >= 3:
-            # try swap next index to avoid same-player
-            idxs[i+1], idxs[(i+2) % len(idxs)] = idxs[(i+2) % len(idxs)], idxs[i+1]
-            b = items[idxs[i+1]]
+    # Pair remaining entries
+    while len(items) >= 2:
+        a = pick_from_lowest_tally(items, tally)
+        items.remove(a)
+        b = pick_from_lowest_tally(items, tally, exclude_player=a.player)
+        if b is None:
+            # cannot find valid opponent now → push a to the end and retry
+            items.append(a)
+            # break to avoid infinite loop; leftover will become carry
+            break
+        items.remove(b)
         pairs.append((a, b))
-        i += 2
+        tally[a.player] = tally.get(a.player, 0) + 1
+        tally[b.player] = tally.get(b.player, 0) + 1
 
-    # Leftover if odd count
-    if i < len(idxs):
-        carry = items[idxs[i]]
+    # leftover becomes carry
+    if len(items) == 1:
+        carry = items[0]
 
     return pairs, carry
 
 def generate_bracket_groups(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
+    """
+    Balanced-random Groups:
+      - one entry per player per ring
+      - pairings chosen by lowest-tally random picks to keep things fair but not repetitive
+    """
     rings, _ = build_rings(entries)
     pairs: List[Tuple[Entry, Entry]] = []
     carry: Optional[Entry] = None
-    # Alternate pairing parity per ring to vary who meets whom
-    for ring_idx, ring in enumerate(rings):
-        start_parity = random.randint(0, 1)  # 0 or 1, per ring
-        ring_pairs, carry = pair_within_ring_alternating(ring, start_parity, carry)
+    tally: Dict[str, int] = {}
+    for ring in rings:
+        ring_pairs, carry = pair_ring_balanced_random(ring, tally, carry)
         pairs.extend(ring_pairs)
     if carry is not None:
         pairs.append((carry, Entry(player="SYSTEM", character="BYE", slot=0)))
     return pairs
 
-# ---- EVERYTHING: groups spacing + random cross-ring offset (no Slot1 vs Slot1) ----
+# ---------- EVERYTHING: Groups (balanced-random) + targeted Slot-1 fix ----------
+def fix_first_pick_conflicts(bracket: List[Tuple[Entry, Entry]]) -> List[Tuple[Entry, Entry]]:
+    """
+    If a match has Slot1 vs Slot1 (different players):
+      swap one Slot1 with a NON-Slot1 from the same player whose opponent is NOT Slot1.
+    """
+    def is_slot1(e: Entry) -> bool:
+        return e.slot == 1 and e.player != "SYSTEM"
+
+    def safe_swap_ok(a_entry: Entry, a_opp: Entry, b_entry: Entry, b_opp: Entry) -> bool:
+        return (a_entry.player != b_opp.player) and (b_entry.player != a_opp.player)
+
+    for _ in range(6):  # a few cleanup passes
+        changed = False
+        # index who appears where
+        appearances: Dict[str, List[Tuple[int, str, Entry, Entry]]] = {}
+        for idx, (x, y) in enumerate(bracket):
+            appearances.setdefault(x.player, []).append((idx, "A", x, y))
+            appearances.setdefault(y.player, []).append((idx, "B", y, x))
+
+        conflicts = [i for i, (x, y) in enumerate(bracket) if is_slot1(x) and is_slot1(y) and x.player != y.player]
+        if not conflicts:
+            break
+
+        for i in conflicts:
+            a, b = bracket[i]
+            fixed_here = False
+            # Try fixing via 'a' player's other non-slot1
+            for (j, side, entry, opp) in appearances.get(a.player, []):
+                if j == i:  # same match
+                    continue
+                if entry.slot != 1 and not is_slot1(opp) and safe_swap_ok(entry, opp, a, b):
+                    if side == "A":
+                        bracket[i] = (entry, b)
+                        bracket[j] = (a, bracket[j][1])
+                    else:
+                        bracket[i] = (entry, b)
+                        bracket[j] = (bracket[j][0], a)
+                    changed = True
+                    fixed_here = True
+                    break
+            if fixed_here:
+                continue
+            # Try fixing via 'b' player's other non-slot1
+            for (j, side, entry, opp) in appearances.get(b.player, []):
+                if j == i:
+                    continue
+                if entry.slot != 1 and not is_slot1(opp) and safe_swap_ok(entry, opp, b, a):
+                    if side == "A":
+                        bracket[i] = (a, entry)
+                        bracket[j] = (b, bracket[j][1])
+                    else:
+                        bracket[i] = (a, entry)
+                        bracket[j] = (bracket[j][0], b)
+                    changed = True
+                    fixed_here = True
+                    break
+        if not changed:
+            break
+    return bracket
+
 def generate_bracket_everything(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
-    """
-    Keep the Groups seed order (rings built with same player order = spacing kept).
-    Pair ring0 vs ring1, ring2 vs ring3, ... using a RANDOM offset k in [1, P-1]:
-      b = ring_b[(j + k) % len(ring_b)]
-    This guarantees:
-      - no same-player (k != 0),
-      - Slot1 (ring0) never faces Slot1 (ring1),
-      - more variety across runs.
-    If odd number of rings, the last ring is paired internally (with alternating parity).
-    """
-    rings, p_order = build_rings(entries)
-    P = len(p_order)
-
-    pairs: List[Tuple[Entry, Entry]] = []
-    i = 0
-    while i + 1 < len(rings):
-        ring_a, ring_b = rings[i], rings[i+1]
-        nA, nB = len(ring_a), len(ring_b)
-        n = min(nA, nB)
-        if n == 0:
-            i += 2
-            continue
-
-        # choose random offset k ∈ [1, nB-1] (if nB==1, we can't offset -> pair with BYE)
-        if nB > 1:
-            k = random.randint(1, nB - 1)
-        else:
-            k = 0
-
-        for j in range(n):
-            a = ring_a[j]
-            if nB > 1:
-                b = ring_b[(j + k) % nB]
-            else:
-                b = Entry("SYSTEM", "BYE", 0)
-            # Safety guard (very rare with k!=0)
-            if a.player == b.player and a.player != "SYSTEM":
-                # try another offset quickly
-                alt = (k + 1) % max(nB, 1)
-                if nB > 1:
-                    b = ring_b[(j + alt) % nB]
-                else:
-                    b = Entry("SYSTEM", "BYE", 0)
-            pairs.append((a, b))
-
-        # any leftovers -> BYEs
-        if nA > n:
-            for t in range(n, nA):
-                pairs.append((ring_a[t], Entry("SYSTEM", "BYE", 0)))
-        if nB > n:
-            for t in range(n, nB):
-                pairs.append((Entry("SYSTEM", "BYE", 0), ring_b[t]))
-        i += 2
-
-    if i < len(rings):  # leftover ring -> internal pairing with alternating parity
-        start_parity = random.randint(0, 1)
-        tail_pairs, carry = pair_within_ring_alternating(rings[i], start_parity, carry=None)
-        pairs.extend(tail_pairs)
-        if carry is not None:
-            pairs.append((carry, Entry(player="SYSTEM", character="BYE", slot=0)))
-
-    return pairs
+    base = generate_bracket_groups(entries)  # already balanced-random via tallies
+    return fix_first_pick_conflicts(base)
 
 # ---------- Sidebar ----------
 with st.sidebar:
@@ -254,8 +250,8 @@ with st.sidebar:
         help=(
             "regular: no self-match in round 1\n"
             "first_pick: regular + forbids Slot 1 vs Slot 1\n"
-            "groups: keeps spacing by #players; alternating parity per ring for variety\n"
-            "everything: keeps spacing; pairs ring0 vs ring1 (random offset), ring2 vs ring3, ..."
+            "groups: **balanced-random** using per-player tallies (still 1 entry per player per ring)\n"
+            "everything: groups first, then fix any Slot1 vs Slot1 by swapping with a same-player non-Slot1"
         )
     )
 
@@ -414,9 +410,7 @@ with col_gen:
                 st.success(f"Bracket generated using rule: {rule}")
                 out_lines = []
                 for i, (a, b) in enumerate(bracket, start=1):
-                    out_lines.append(
-                        f"Match {i}: {a.character} ({a.player}, Slot {a.slot})  vs  {b.character} ({b.player}, Slot {b.slot})"
-                    )
+                    out_lines.append(f"Match {i}: {a.character} ({a.player}, Slot {a.slot})  vs  {b.character} ({b.player}, Slot {b.slot})")
                 st.code("\n".join(out_lines), language="text")
 
                 # CSV download
@@ -444,8 +438,7 @@ st.markdown(
     **Rule Set details**
     - **regular**: random bracket; forbids **same-player** matches in Round 1.
     - **first_pick**: regular **+** forbids **Slot 1 vs Slot 1** in Round 1.
-    - **groups**: fixed round-robin seeding (spacing by #players) with **alternating parity per ring** for variety.
-    - **everything**: same spacing; **ring0 vs ring1** (random offset k∈[1,P-1]), **ring2 vs ring3**, … to avoid Slot1 vs Slot1 and add variety.
+    - **groups**: **balanced-random** using per-player **tallies** inside each slot ring (1 entry per player); avoids repetitive patterns.
+    - **everything**: **groups first**, then swaps away any **Slot1 vs Slot1** via a same-player non-Slot1 whose opponent isn’t Slot-1.
     """
 )
-st.caption("Made with ❤️ for quick living-room brackets.")
