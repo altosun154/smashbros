@@ -1,19 +1,15 @@
-# app.py — Smash Bracket: regular / first_pick / groups (balanced-random tallies) / everything
+# app.py — Smash Bracket: regular / first_pick / groups (balanced; power-of-2 BYEs) / everything
 import streamlit as st
 import random
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict
 import pandas as pd
+import math
 
 st.set_page_config(page_title="Smash Bracket (No Self-Match)", page_icon="🎮", layout="wide")
 
 st.title("🎮 Smash Bracket — No Self-Match in Round 1")
-st.markdown(
-    """
-    Use the **sidebar** to add players, set **characters per player**, pick a **Rule Set**, then
-    **Auto-Create/Reset Entries** and **Auto-fill Characters**. Generate a round-1 bracket with constraints.
-    """
-)
+st.markdown("Pick a rule set, auto-fill entries, and generate a round-1 bracket that fits a **power-of-two** bracket size (with BYEs).")
 
 @dataclass(frozen=True)
 class Entry:
@@ -21,7 +17,16 @@ class Entry:
     character: str
     slot: int  # per-player slot index (1 = first pick)
 
-# ---------- Pairing for 'regular' / 'first_pick' ----------
+# ---------- Power-of-two helpers ----------
+def next_power_of_two(n: int) -> int:
+    if n <= 1:
+        return 1
+    return 1 << (n - 1).bit_length()
+
+def byes_needed(n: int) -> int:
+    return max(0, next_power_of_two(n) - n)
+
+# ---------- Regular / First-pick (backtracking) ----------
 def recursive_pairing(entries: List[Entry], rule: str) -> Optional[List[Tuple[Entry, Entry]]]:
     n = len(entries)
     if n == 0:
@@ -36,10 +41,10 @@ def recursive_pairing(entries: List[Entry], rule: str) -> Optional[List[Tuple[En
             if rest is not None:
                 return [(a, b)] + rest
             continue
-        # Base rule: no same-player
+        # Base: no same player
         if a.player == b.player:
             continue
-        # 1st pick protection
+        # 1st pick guard
         if rule == "first_pick" and a.slot == 1 and b.slot == 1:
             continue
         remaining = entries[1:i] + entries[i+1:]
@@ -50,12 +55,16 @@ def recursive_pairing(entries: List[Entry], rule: str) -> Optional[List[Tuple[En
 
 def generate_bracket_regular_or_firstpick(raw_entries: List[Entry], rule: str):
     entries = raw_entries.copy()
-    if len(entries) % 2 == 1:
+    # Add exactly the required BYEs up front
+    need = byes_needed(len(entries))
+    for _ in range(need):
         entries.append(Entry(player="SYSTEM", character="BYE", slot=0))
-    for _ in range(400):
+    # Find a valid matching
+    for _ in range(500):
         random.shuffle(entries)
         result = recursive_pairing(entries, rule)
         if result is not None:
+            # Randomize within-pair order
             out = []
             for a, b in result:
                 if random.random() < 0.5:
@@ -65,131 +74,180 @@ def generate_bracket_regular_or_firstpick(raw_entries: List[Entry], rule: str):
             return out
     return None
 
-# ---------- Balanced-random "Groups" using tallies ----------
+# ---------- Groups / Everything (balanced-random with *exact* BYE distribution) ----------
 def players_from_entries(entries: List[Entry]) -> List[str]:
     seen = []
     for e in entries:
         if e.player != "SYSTEM" and e.player not in seen:
             seen.append(e.player)
-    random.shuffle(seen)  # one-time global shuffle for variety
+    random.shuffle(seen)  # single global shuffle for variety
     return seen
 
 def build_rings(entries: List[Entry]) -> Tuple[List[List[Entry]], List[str]]:
     """ring[0]=all Slot1 entries (one per player), ring[1]=all Slot2, ..."""
-    by_player_slot: Dict[Tuple[str,int], Entry] = {}
     max_slot = 0
+    by_player_slot: Dict[Tuple[str, int], Entry] = {}
     for e in entries:
         if e.player == "SYSTEM":
             continue
         by_player_slot[(e.player, e.slot)] = e
         max_slot = max(max_slot, e.slot)
-
-    p_order = players_from_entries(entries)
+    order = players_from_entries(entries)
     rings: List[List[Entry]] = []
     for s in range(1, max_slot + 1):
-        ring = [by_player_slot[(p, s)] for p in p_order if (p, s) in by_player_slot]
+        ring = [by_player_slot[(p, s)] for p in order if (p, s) in by_player_slot]
         rings.append(ring)
-    return rings, p_order
+    return rings, order
 
-def pick_from_lowest_tally(candidates: List[Entry], tally: Dict[str, int], exclude_player: Optional[str] = None) -> Optional[Entry]:
-    pool = [e for e in candidates if e.player != exclude_player]
+def pick_from_lowest_tally(cands: List[Entry], tally: Dict[str, int], exclude_player: Optional[str] = None) -> Optional[Entry]:
+    pool = [e for e in cands if e.player != exclude_player]
     if not pool:
         return None
-    min_t = min(tally.get(e.player, 0) for e in pool)
-    lowest = [e for e in pool if tally.get(e.player, 0) == min_t]
+    m = min(tally.get(e.player, 0) for e in pool)
+    lowest = [e for e in pool if tally.get(e.player, 0) == m]
     return random.choice(lowest)
 
-def pair_ring_balanced_random(ring: List[Entry], tally: Dict[str, int], carry: Optional[Entry]) -> Tuple[List[Tuple[Entry, Entry]], Optional[Entry]]:
+def pair_ring_balanced_with_bye_quota(
+    ring: List[Entry],
+    tally: Dict[str, int],
+    carry: Optional[Entry],
+    bye_quota: int
+) -> Tuple[List[Tuple[Entry, Entry]], Optional[Entry], int]:
     """
-    Pair entries inside this ring using the tally rule:
-      - choose first fighter among lowest-tally players at random
-      - choose opponent among remaining lowest-tally players at random
-    Carry (from an odd previous ring) is paired first.
+    Pair inside a ring using balanced-random tallies.
+    Use up to bye_quota BYEs inside this ring.
+     - If a carry exists and we still have BYEs -> pair carry with BYE.
+     - Otherwise pair carry against a lowest-tally opponent (not same player).
+     - For remaining items, repeatedly:
+         * pick 'a' from lowest-tally at random,
+         * if bye_quota>0 -> (a, BYE) and consume one,
+         * else pick 'b' from lowest-tally (not same player).
+    Returns (pairs, new_carry, bye_used_left_for_this_ring).
     """
     pairs: List[Tuple[Entry, Entry]] = []
     items = ring.copy()
 
-    # If there's a carry from previous ring, pair it with a lowest-tally opponent
+    # 1) Handle carry first
     if carry is not None:
-        opp = pick_from_lowest_tally(items, tally, exclude_player=carry.player)
-        if opp is None:
-            # no opponent -> keep carrying
-            return pairs, carry
-        items.remove(opp)
-        pairs.append((carry, opp))
-        tally[carry.player] = tally.get(carry.player, 0) + 1
-        tally[opp.player] = tally.get(opp.player, 0) + 1
-        carry = None
+        if bye_quota > 0:
+            pairs.append((carry, Entry("SYSTEM", "BYE", 0)))
+            tally[carry.player] = tally.get(carry.player, 0) + 1
+            bye_quota -= 1
+            carry = None
+        else:
+            opp = pick_from_lowest_tally(items, tally, exclude_player=carry.player)
+            if opp is not None:
+                items.remove(opp)
+                pairs.append((carry, opp))
+                tally[carry.player] = tally.get(carry.player, 0) + 1
+                tally[opp.player] = tally.get(opp.player, 0) + 1
+                carry = None
+            else:
+                # no opponent available now -> keep carry
+                return pairs, carry, bye_quota
 
-    # Pair remaining entries
-    while len(items) >= 2:
+    # 2) Pair remaining entries
+    while items:
         a = pick_from_lowest_tally(items, tally)
+        if a is None:
+            break
         items.remove(a)
+
+        # Prefer to spend a BYE here if quota remains
+        if bye_quota > 0:
+            pairs.append((a, Entry("SYSTEM", "BYE", 0)))
+            tally[a.player] = tally.get(a.player, 0) + 1
+            bye_quota -= 1
+            continue
+
         b = pick_from_lowest_tally(items, tally, exclude_player=a.player)
         if b is None:
-            # cannot find valid opponent now → push a to the end and retry
-            items.append(a)
-            # break to avoid infinite loop; leftover will become carry
+            # Can't find valid opponent now -> make 'a' the new carry
+            carry = a
             break
         items.remove(b)
         pairs.append((a, b))
         tally[a.player] = tally.get(a.player, 0) + 1
         tally[b.player] = tally.get(b.player, 0) + 1
 
-    # leftover becomes carry
-    if len(items) == 1:
+    # If one leftover without quota, becomes carry
+    if items:
         carry = items[0]
-
-    return pairs, carry
+    return pairs, carry, bye_quota
 
 def generate_bracket_groups(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
     """
-    Balanced-random Groups:
-      - one entry per player per ring
-      - pairings chosen by lowest-tally random picks to keep things fair but not repetitive
+    Balanced-random groups with *exact* BYE count to reach the next power of 2.
+    BYEs are distributed proportionally across rings to keep things fair.
     """
-    rings, _ = build_rings(entries)
+    base_entries = [e for e in entries if e.player != "SYSTEM"]
+    need = byes_needed(len(base_entries))
+    rings, _ = build_rings(base_entries)
+
+    # Proportional BYE allocation per ring
+    ring_sizes = [len(r) for r in rings]
+    total_slots = sum(ring_sizes)
+    # Guard against zero division
+    if total_slots == 0:
+        return []
+
+    # First pass: proportional allocation
+    quotas = [ (need * sz) / total_slots for sz in ring_sizes ]
+    quotas = [int(math.floor(q)) for q in quotas]
+    used = sum(quotas)
+    # Distribute leftovers (largest fractional opportunity: by ring size)
+    leftover = need - used
+    order = sorted(range(len(rings)), key=lambda i: ring_sizes[i], reverse=True)
+    j = 0
+    while leftover > 0 and order:
+        idx = order[j % len(order)]
+        # don't exceed ring size
+        if quotas[idx] < ring_sizes[idx]:
+            quotas[idx] += 1
+            leftover -= 1
+        j += 1
+
     pairs: List[Tuple[Entry, Entry]] = []
     carry: Optional[Entry] = None
     tally: Dict[str, int] = {}
-    for ring in rings:
-        ring_pairs, carry = pair_ring_balanced_random(ring, tally, carry)
+
+    for r_idx, ring in enumerate(rings):
+        ring_pairs, carry, unused_quota = pair_ring_balanced_with_bye_quota(
+            ring, tally, carry, quotas[r_idx]
+        )
         pairs.extend(ring_pairs)
+        # If we couldn't spend all quota inside this ring (e.g., too few items), push it forward
+        if unused_quota > 0 and r_idx + 1 < len(quotas):
+            quotas[r_idx + 1] += unused_quota
+
+    # After all rings, if carry remains, it must take a BYE (consume from any remaining quota).
+    leftover_quota = sum(quotas[len(rings):]) if len(quotas) > len(rings) else 0
     if carry is not None:
-        pairs.append((carry, Entry(player="SYSTEM", character="BYE", slot=0)))
+        pairs.append((carry, Entry("SYSTEM", "BYE", 0)))
+
     return pairs
 
-# ---------- EVERYTHING: Groups (balanced-random) + targeted Slot-1 fix ----------
+# ---------- EVERYTHING: groups first, then slot-1 conflict fix ----------
 def fix_first_pick_conflicts(bracket: List[Tuple[Entry, Entry]]) -> List[Tuple[Entry, Entry]]:
-    """
-    If a match has Slot1 vs Slot1 (different players):
-      swap one Slot1 with a NON-Slot1 from the same player whose opponent is NOT Slot1.
-    """
     def is_slot1(e: Entry) -> bool:
         return e.slot == 1 and e.player != "SYSTEM"
-
     def safe_swap_ok(a_entry: Entry, a_opp: Entry, b_entry: Entry, b_opp: Entry) -> bool:
         return (a_entry.player != b_opp.player) and (b_entry.player != a_opp.player)
 
-    for _ in range(6):  # a few cleanup passes
+    for _ in range(6):
         changed = False
-        # index who appears where
-        appearances: Dict[str, List[Tuple[int, str, Entry, Entry]]] = {}
+        app: Dict[str, List[Tuple[int, str, Entry, Entry]]] = {}
         for idx, (x, y) in enumerate(bracket):
-            appearances.setdefault(x.player, []).append((idx, "A", x, y))
-            appearances.setdefault(y.player, []).append((idx, "B", y, x))
-
+            app.setdefault(x.player, []).append((idx, "A", x, y))
+            app.setdefault(y.player, []).append((idx, "B", y, x))
         conflicts = [i for i, (x, y) in enumerate(bracket) if is_slot1(x) and is_slot1(y) and x.player != y.player]
         if not conflicts:
             break
-
         for i in conflicts:
             a, b = bracket[i]
-            fixed_here = False
-            # Try fixing via 'a' player's other non-slot1
-            for (j, side, entry, opp) in appearances.get(a.player, []):
-                if j == i:  # same match
-                    continue
+            fixed = False
+            for (j, side, entry, opp) in app.get(a.player, []):
+                if j == i: continue
                 if entry.slot != 1 and not is_slot1(opp) and safe_swap_ok(entry, opp, a, b):
                     if side == "A":
                         bracket[i] = (entry, b)
@@ -197,15 +255,10 @@ def fix_first_pick_conflicts(bracket: List[Tuple[Entry, Entry]]) -> List[Tuple[E
                     else:
                         bracket[i] = (entry, b)
                         bracket[j] = (bracket[j][0], a)
-                    changed = True
-                    fixed_here = True
-                    break
-            if fixed_here:
-                continue
-            # Try fixing via 'b' player's other non-slot1
-            for (j, side, entry, opp) in appearances.get(b.player, []):
-                if j == i:
-                    continue
+                    changed = True; fixed = True; break
+            if fixed: continue
+            for (j, side, entry, opp) in app.get(b.player, []):
+                if j == i: continue
                 if entry.slot != 1 and not is_slot1(opp) and safe_swap_ok(entry, opp, b, a):
                     if side == "A":
                         bracket[i] = (a, entry)
@@ -213,15 +266,13 @@ def fix_first_pick_conflicts(bracket: List[Tuple[Entry, Entry]]) -> List[Tuple[E
                     else:
                         bracket[i] = (a, entry)
                         bracket[j] = (bracket[j][0], b)
-                    changed = True
-                    fixed_here = True
-                    break
+                    changed = True; fixed = True; break
         if not changed:
             break
     return bracket
 
 def generate_bracket_everything(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
-    base = generate_bracket_groups(entries)  # already balanced-random via tallies
+    base = generate_bracket_groups(entries)
     return fix_first_pick_conflicts(base)
 
 # ---------- Sidebar ----------
@@ -250,8 +301,8 @@ with st.sidebar:
         help=(
             "regular: no self-match in round 1\n"
             "first_pick: regular + forbids Slot 1 vs Slot 1\n"
-            "groups: **balanced-random** using per-player tallies (still 1 entry per player per ring)\n"
-            "everything: groups first, then fix any Slot1 vs Slot1 by swapping with a same-player non-Slot1"
+            "groups: balanced-random per ring using tallies; BYEs distributed to reach next power of 2\n"
+            "everything: groups first, then swap away Slot1 vs Slot1 when possible"
         )
     )
 
@@ -265,7 +316,6 @@ with st.sidebar:
     st.divider()
     st.header("General")
     clean_rows = st.checkbox("Remove empty rows", value=True)
-    st.caption("Tip: If one player owns more than half of all entries, a valid no-self-match bracket may be impossible.")
 
 # ---------- Helpers (robust Slot handling) ----------
 def assign_slots(df: pd.DataFrame) -> pd.DataFrame:
@@ -354,7 +404,6 @@ if players:
 
 # ---------- Entries editor ----------
 st.subheader("Entries")
-
 with st.container():
     c1, c2, c3 = st.columns([1, 2, 1])
     with c1:
@@ -405,9 +454,13 @@ with col_gen:
                 bracket = generate_bracket_everything(entries)
 
             if bracket is None:
-                st.error("Couldn't build a valid round-1 bracket with those constraints. Try balancing counts or allowing a BYE (odd total).")
+                st.error("Couldn't build a valid round-1 bracket with those constraints.")
             else:
-                st.success(f"Bracket generated using rule: {rule}")
+                # Show target size / BYEs summary
+                total = len(entries)
+                target = next_power_of_two(total)
+                need = target - total
+                st.success(f"Bracket generated — Total entries: {total} → Target: {target}, BYEs: {need}")
                 out_lines = []
                 for i, (a, b) in enumerate(bracket, start=1):
                     out_lines.append(f"Match {i}: {a.character} ({a.player}, Slot {a.slot})  vs  {b.character} ({b.player}, Slot {b.slot})")
@@ -432,13 +485,4 @@ with col_clear:
         st.session_state.table_df = pd.DataFrame(columns=["Player", "Character", "Slot"])
         st.rerun()
 
-st.divider()
-st.markdown(
-    """
-    **Rule Set details**
-    - **regular**: random bracket; forbids **same-player** matches in Round 1.
-    - **first_pick**: regular **+** forbids **Slot 1 vs Slot 1** in Round 1.
-    - **groups**: **balanced-random** using per-player **tallies** inside each slot ring (1 entry per player); avoids repetitive patterns.
-    - **everything**: **groups first**, then swaps away any **Slot1 vs Slot1** via a same-player non-Slot1 whose opponent isn’t Slot-1.
-    """
-)
+st.caption("BYEs are allocated so the round fits the next power-of-two bracket (16, 32, 64, …).")
