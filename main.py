@@ -1,4 +1,4 @@
-# app.py — Smash Bracket (no slots) + Teams with colored names + R1 winners + power-of-two BYEs
+# app.py — Smash Bracket (no slots) + Teams/colors + Everything + compact full bracket
 import streamlit as st
 import random
 from dataclasses import dataclass
@@ -7,8 +7,26 @@ import pandas as pd
 import math
 import os
 
-st.set_page_config(page_title="Smash Bracket (Teams & Colors)", page_icon="🎮", layout="wide")
-st.title("🎮 Smash Bracket — Round 1 Generator (No Slots)")
+st.set_page_config(page_title="Smash Bracket", page_icon="🎮", layout="wide")
+st.markdown("""
+<style>
+/* Compact styling so the whole bracket fits without scrolling much */
+.match-box {
+  border: 1px solid #ddd; border-radius: 10px; padding: 6px 8px; margin: 6px 0;
+  font-size: 14px; line-height: 1.25; background: #fff;
+}
+.round-title { font-weight: 700; margin-bottom: 8px; }
+.name-line { display: flex; align-items: center; gap: 6px; }
+.name-line img { vertical-align: middle; }
+.tbd { opacity: 0.6; font-style: italic; }
+.legend-badge {
+  display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; vertical-align:middle;
+}
+.small { font-size: 13px; }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🎮 Smash Bracket — No Self-Match, Teams, Everything")
 
 # ---------------------------- Data types ----------------------------
 @dataclass(frozen=True)
@@ -25,139 +43,6 @@ def next_power_of_two(n: int) -> int:
 def byes_needed(n: int) -> int:
     return max(0, next_power_of_two(n) - n)
 
-# ---------------------------- Pairing (regular / teams) via backtracking ----------------------------
-def recursive_pairing(entries: List[Entry], forbid_same_team: bool, team_of: Dict[str, str]) -> Optional[List[Tuple[Entry, Entry]]]:
-    """
-    Perfect matching with constraints:
-      - Forbid same-player match (always).
-      - If forbid_same_team: forbid same-team (when both players have a team label and it matches).
-      - BYE can face anyone.
-    """
-    n = len(entries)
-    if n == 0:
-        return []
-    a = entries[0]
-    for i in range(1, n):
-        b = entries[i]
-
-        # BYE can face anyone
-        if "BYE" in (a.character.upper(), b.character.upper()):
-            remaining = entries[1:i] + entries[i+1:]
-            rest = recursive_pairing(remaining, forbid_same_team, team_of)
-            if rest is not None:
-                return [(a, b)] + rest
-            continue
-
-        # Base rule: no self
-        if a.player == b.player:
-            continue
-
-        # Teams rule
-        if forbid_same_team:
-            ta = team_of.get(a.player, "")
-            tb = team_of.get(b.player, "")
-            if ta and tb and ta == tb:
-                continue
-
-        remaining = entries[1:i] + entries[i+1:]
-        rest = recursive_pairing(remaining, forbid_same_team, team_of)
-        if rest is not None:
-            return [(a, b)] + rest
-    return None
-
-def generate_bracket_regular_or_teams(raw_entries: List[Entry], forbid_same_team: bool, team_of: Dict[str, str]):
-    entries = raw_entries.copy()
-    # Fill to next power of 2 with BYEs
-    need = byes_needed(len(entries))
-    for _ in range(need):
-        entries.append(Entry(player="SYSTEM", character="BYE"))
-
-    # Try multiple shuffles to find a valid matching
-    for _ in range(700):
-        random.shuffle(entries)
-        result = recursive_pairing(entries, forbid_same_team, team_of)
-        if result is not None:
-            # Randomize within-pair order for fairness
-            out: List[Tuple[Entry, Entry]] = []
-            for a, b in result:
-                if random.random() < 0.5:
-                    out.append((b, a))
-                else:
-                    out.append((a, b))
-            return out
-    return None
-
-# ---------------------------- Balanced-random "Groups" (no slots) with exact BYEs ----------------------------
-def players_from_entries(entries: List[Entry]) -> List[str]:
-    seen = []
-    for e in entries:
-        if e.player != "SYSTEM" and e.player not in seen:
-            seen.append(e.player)
-    random.shuffle(seen)  # one-time mix
-    return seen
-
-def pick_from_lowest_tally(cands: List[Entry], tally: Dict[str, int], exclude_player: Optional[str] = None) -> Optional[Entry]:
-    pool = [e for e in cands if e.player != exclude_player]
-    if not pool:
-        return None
-    m = min(tally.get(e.player, 0) for e in pool)
-    lowest = [e for e in pool if tally.get(e.player, 0) == m]
-    return random.choice(lowest)
-
-def generate_bracket_groups(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
-    """
-    Balanced-random pairing across the entire pool (no slots), with exact BYEs to reach next power of 2.
-    - Keep a per-player tally of how many R1 pairings they've been assigned (just for balancing).
-    - Greedily pick two from the *current* lowest-tally pool; if odd leftover, it gets a BYE.
-    """
-    base = [e for e in entries if e.player != "SYSTEM"]
-    need = byes_needed(len(base))
-
-    bag = base.copy()
-    random.shuffle(bag)
-    tally: Dict[str, int] = {}
-    pairs: List[Tuple[Entry, Entry]] = []
-
-    # First, use BYEs to consume some items if needed (spread roughly evenly)
-    # Strategy: periodically drop a BYE on a lowest-tally pick until BYEs are used up.
-    while need > 0 and bag:
-        a = pick_from_lowest_tally(bag, tally)
-        bag.remove(a)
-        pairs.append((a, Entry("SYSTEM", "BYE")))
-        tally[a.player] = tally.get(a.player, 0) + 1
-        need -= 1
-
-    # Pair the rest
-    while len(bag) >= 2:
-        a = pick_from_lowest_tally(bag, tally)
-        bag.remove(a)
-        b = pick_from_lowest_tally(bag, tally, exclude_player=a.player)
-        if b is None:
-            # no valid opponent now -> give BYE if any left, else push back and try later
-            if need > 0:
-                pairs.append((a, Entry("SYSTEM", "BYE")))
-                tally[a.player] = tally.get(a.player, 0) + 1
-                need -= 1
-            else:
-                # Put a back and reshuffle a bit to escape deadlock
-                bag.append(a)
-                random.shuffle(bag)
-                # if still impossible (rare), break to avoid infinite loop
-                if len(bag) == 1:
-                    break
-                continue
-        else:
-            bag.remove(b)
-            pairs.append((a, b))
-            tally[a.player] = tally.get(a.player, 0) + 1
-            tally[b.player] = tally.get(b.player, 0) + 1
-
-    # If an odd one remains, it must get a BYE (and we should still be at exact power-of-two)
-    if bag:
-        pairs.append((bag[0], Entry("SYSTEM", "BYE")))
-
-    return pairs
-
 # ---------------------------- Icon + color helpers ----------------------------
 ICON_DIR = os.path.join(os.path.dirname(__file__), "images")
 
@@ -168,7 +53,6 @@ def get_character_icon_path(char_name: str) -> Optional[str]:
     path = os.path.join(ICON_DIR, fname)
     return path if os.path.exists(path) else None
 
-# Default palettes
 TEAM_COLOR_FALLBACKS = [
     "#E91E63", "#3F51B5", "#009688", "#FF9800", "#9C27B0",
     "#4CAF50", "#2196F3", "#FF5722", "#795548", "#607D8B"
@@ -178,9 +62,8 @@ PLAYER_FALLBACKS = [
     "#955251", "#B565A7", "#009B77", "#DD4124", "#45B8AC"
 ]
 
-def render_name(player: str, team_of: Dict[str, str], team_colors: Dict[str, str], player_colors: Dict[str, str]) -> str:
+def render_name_html(player: str, team_of: Dict[str, str], team_colors: Dict[str, str], player_colors: Dict[str, str]) -> str:
     t = team_of.get(player, "")
-    color = ""
     if t and team_colors.get(t):
         color = team_colors[t]
     else:
@@ -188,29 +71,144 @@ def render_name(player: str, team_of: Dict[str, str], team_colors: Dict[str, str
     safe_player = player.replace("<", "&lt;").replace(">", "&gt;")
     return f"<span style='color:{color};font-weight:600'>{safe_player}</span>"
 
-def render_entry(e: Entry, team_of: Dict[str, str], team_colors: Dict[str, str], player_colors: Dict[str, str]) -> str:
+def entry_to_label(e: Entry) -> str:
+    return f"{e.player} — {e.character}"
+
+def render_entry_line(e: Entry, team_of: Dict[str, str], team_colors: Dict[str, str], player_colors: Dict[str, str]) -> str:
     if e.character.upper() == "BYE":
-        return "<span style='opacity:0.7;font-style:italic'>BYE</span>"
+        return "<div class='name-line tbd'>BYE</div>"
     icon = get_character_icon_path(e.character)
-    name_html = render_name(e.player, team_of, team_colors, player_colors)
+    name_html = render_name_html(e.player, team_of, team_colors, player_colors)
     char_safe = e.character.replace("<", "&lt;").replace(">", "&gt;")
     if icon:
-        # Use HTML <img> tag to show local file
-        return f"<img src='file://{icon}' width='36' style='vertical-align:middle;margin-right:8px'/> <b>{char_safe}</b> ({name_html})"
+        return f"<div class='name-line'><img src='file://{icon}' width='24'/> <b>{char_safe}</b> ({name_html})</div>"
     else:
-        return f"<b>{char_safe}</b> ({name_html})"
+        return f"<div class='name-line'><b>{char_safe}</b> ({name_html})</div>"
+
+# ---------------------------- Balanced pairing engines ----------------------------
+def players_from_entries(entries: List[Entry]) -> List[str]:
+    seen = []
+    for e in entries:
+        if e.player != "SYSTEM" and e.player not in seen:
+            seen.append(e.player)
+    random.shuffle(seen)
+    return seen
+
+def pick_from_lowest_tally(cands: List[Entry], tally: Dict[str, int], exclude_player: Optional[str] = None) -> Optional[Entry]:
+    pool = [e for e in cands if e.player != exclude_player]
+    if not pool:
+        return None
+    m = min(tally.get(e.player, 0) for e in pool)
+    lowest = [e for e in pool if tally.get(e.player, 0) == m]
+    return random.choice(lowest)
+
+def generate_bracket_balanced(
+    entries: List[Entry],
+    *,
+    forbid_same_team: bool = False,
+    prefer_cross_team: bool = False,
+    team_of: Optional[Dict[str, str]] = None
+) -> List[Tuple[Entry, Entry]]:
+    """
+    Balanced-random pairing for 'regular', 'groups' (no slots), and 'everything'.
+    - Always forbids self-matches.
+    - If forbid_same_team: block same-team pairs (if both have team).
+    - If prefer_cross_team: try to pick an opponent from a *different* team first; if impossible, allow any (except self).
+    - Adds exact number of BYEs to reach next power of 2.
+    """
+    team_of = team_of or {}
+    base = [e for e in entries if e.player != "SYSTEM"]
+    need = byes_needed(len(base))
+
+    bag = base.copy()
+    random.shuffle(bag)
+    tally: Dict[str, int] = {}
+    pairs: List[Tuple[Entry, Entry]] = []
+
+    # Sprinkle BYEs first to reach target size
+    while need > 0 and bag:
+        a = pick_from_lowest_tally(bag, tally)
+        bag.remove(a)
+        pairs.append((a, Entry("SYSTEM", "BYE")))
+        tally[a.player] = tally.get(a.player, 0) + 1
+        need -= 1
+
+    def pick_opponent(a: Entry, pool: List[Entry]) -> Optional[Entry]:
+        # Filter out same-player always
+        pool2 = [x for x in pool if x.player != a.player]
+        if not pool2:
+            return None
+        # Prefer cross-team if requested and both have team labels
+        if prefer_cross_team:
+            ta = team_of.get(a.player, "")
+            cross = [x for x in pool2 if (ta and team_of.get(x.player, "") and team_of.get(x.player, "") != ta)]
+            if cross:
+                # choose among lowest-tally in cross
+                m = min(tally.get(x.player, 0) for x in cross)
+                lowest = [x for x in cross if tally.get(x.player, 0) == m]
+                return random.choice(lowest)
+        # If forbidding same-team, block those
+        if forbid_same_team:
+            ta = team_of.get(a.player, "")
+            pool2 = [x for x in pool2 if not (ta and team_of.get(x.player, "") == ta)]
+            if not pool2:
+                return None
+        # Fallback: lowest-tally from remaining pool
+        m = min(tally.get(x.player, 0) for x in pool2)
+        lowest = [x for x in pool2 if tally.get(x.player, 0) == m]
+        return random.choice(lowest)
+
+    while len(bag) >= 2:
+        a = pick_from_lowest_tally(bag, tally)
+        bag.remove(a)
+        b = pick_opponent(a, bag)
+        if b is None:
+            # try use any remaining BYE if somehow missed
+            if byes_needed(len(bag)+1) > 0:
+                pairs.append((a, Entry("SYSTEM", "BYE")))
+                tally[a.player] = tally.get(a.player, 0) + 1
+            else:
+                # Put back and reshuffle to escape deadlock
+                bag.append(a)
+                random.shuffle(bag)
+                if len(bag) == 1:
+                    break
+            continue
+        bag.remove(b)
+        pairs.append((a, b))
+        tally[a.player] = tally.get(a.player, 0) + 1
+        tally[b.player] = tally.get(b.player, 0) + 1
+
+    if bag:  # odd leftover → BYE
+        pairs.append((bag[0], Entry("SYSTEM", "BYE")))
+    return pairs
+
+def generate_bracket_regular(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
+    return generate_bracket_balanced(entries)
+
+def generate_bracket_groups(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
+    # same engine; groups here just means balanced-random without teams logic
+    return generate_bracket_balanced(entries)
+
+def generate_bracket_teams(entries: List[Entry], team_of: Dict[str, str]) -> List[Tuple[Entry, Entry]]:
+    return generate_bracket_balanced(entries, forbid_same_team=True, team_of=team_of)
+
+def generate_bracket_everything(entries: List[Entry], team_of: Dict[str, str]) -> List[Tuple[Entry, Entry]]:
+    # Balanced + prefer cross-team when possible; still forbids self; allows same-team only if no alternative
+    return generate_bracket_balanced(entries, prefer_cross_team=True, team_of=team_of)
 
 # ---------------------------- Sidebar (rule-first, adaptive) ----------------------------
 with st.sidebar:
     st.header("Rule Set")
     rule = st.selectbox(
         "Choose mode first",
-        options=["regular", "groups", "teams"],
+        options=["regular", "groups", "teams", "everything"],
         index=0,
         help=(
-            "regular: random bracket (no self-match) + BYEs to power-of-2.\n"
-            "groups: balanced-random using per-player tallies (no slots) + BYEs.\n"
-            "teams: like regular but also forbids same-team in R1; choose team colors."
+            "regular: balanced-random, no self-match.\n"
+            "groups: same as regular (no slots), power-of-two BYEs; balanced via tallies.\n"
+            "teams: no self-match + forbids same-team in R1.\n"
+            "everything: balanced + prefers cross-team if teams defined (never self-match)."
         )
     )
 
@@ -226,10 +224,10 @@ with st.sidebar:
     players = [p.strip() for p in players_multiline.splitlines() if p.strip()]
     st.session_state["players_multiline"] = players_multiline
 
-    # Teams-only UI
+    # Teams-only/aware UI
     team_of: Dict[str, str] = {}
     team_colors: Dict[str, str] = {}
-    if rule == "teams":
+    if rule in ("teams", "everything"):
         st.divider()
         st.header("Teams & Colors")
         team_names_input = st.text_input(
@@ -241,7 +239,6 @@ with st.sidebar:
         if not team_labels:
             team_labels = ["Team A", "Team B"]
 
-        # Color pickers per team
         st.caption("Pick a color for each team:")
         for i, t in enumerate(team_labels):
             default = TEAM_COLOR_FALLBACKS[i % len(TEAM_COLOR_FALLBACKS)]
@@ -250,7 +247,6 @@ with st.sidebar:
         st.caption("Assign each player to a team:")
         for p in players:
             team_of[p] = st.selectbox(f"{p}", options=["(none)"] + team_labels, key=f"team_{p}")
-        # Normalize "(none)"
         team_of = {p: (t if t != "(none)" else "") for p, t in team_of.items()}
 
     st.divider()
@@ -266,7 +262,6 @@ with st.sidebar:
     st.divider()
     st.header("General")
     clean_rows = st.checkbox("Remove empty rows", value=True)
-    st.caption("Tip: If one player owns more than half of all entries, valid constraints may be impossible.")
 
 # ---------------------------- Table helpers (no slots) ----------------------------
 def build_entries_df(players: List[str], k: int) -> pd.DataFrame:
@@ -301,6 +296,11 @@ def df_to_entries(df: pd.DataFrame, clean_rows_flag: bool) -> List[Entry]:
 # ---------------------------- State: entries table ----------------------------
 if "table_df" not in st.session_state:
     st.session_state.table_df = pd.DataFrame([
+        {"Player": "You", "Character": "Mario"},
+        {"Player": "You", "Character": "Link"},
+        {"Player": "Friend1", "Character": "Kirby"},
+        {"Player": "Friend1", "Character": "Fox"},
+        {"Player": "Friend2", "Character": "Samus"},
     ])
 
 if build_clicked:
@@ -317,7 +317,7 @@ if auto_fill_clicked:
             st.session_state.table_df, players, int(chars_per_person), shuffle_within_player
         )
 
-# Normalize Player to known list (optional; keep as-is if you want free text)
+# Normalize Player to known list (optional)
 if players:
     st.session_state.table_df["Player"] = st.session_state.table_df["Player"].apply(
         lambda p: p if p in players else (players[0] if p == "" else p)
@@ -337,57 +337,94 @@ table_df = st.data_editor(
 )
 entries = df_to_entries(table_df, clean_rows_flag=clean_rows)
 
-# ---------------------------- Bracket + Winners UI ----------------------------
-st.divider()
-col_gen, col_clear = st.columns([2, 1])
+# ---------------------------- Bracket helpers: rounds & grid ----------------------------
+def compute_rounds_pairs(r1_pairs: List[Tuple[Entry, Entry]], winners_map: Dict[int, str]) -> List[List[Tuple[Optional[Entry], Optional[Entry]]]]:
+    """
+    Build rounds from round1 pairs and winner picks (labels in winners_map).
+    Returns list of rounds; round[0] is R1.
+    """
+    rounds: List[List[Tuple[Optional[Entry], Optional[Entry]]]] = []
+    rounds.append([(a, b) for (a, b) in r1_pairs])
 
-def show_bracket_and_winner_ui(bracket: List[Tuple[Entry, Entry]], rule_label: str, team_of: Dict[str, str], team_colors: Dict[str, str]):
-    total = len([e for e in entries if e.player != "SYSTEM"])
-    target = next_power_of_two(total)
-    need = target - total
-    st.success(f"Bracket generated — Entries: {total} → Target: {target} (BYEs: {need}) — Rule: {rule_label}")
+    # Determine target and number of rounds
+    total_real = sum(1 for (a, b) in r1_pairs for e in (a, b) if e.player != "SYSTEM")
+    target = next_power_of_two(total_real)
+    num_rounds = int(math.log2(target)) if target >= 2 else 1
 
-    # init state
+    # Create subsequent rounds by propagating winners where picked
+    prev = rounds[0]
+    for r in range(1, num_rounds):
+        next_round: List[Tuple[Optional[Entry], Optional[Entry]]] = []
+        for i in range(0, len(prev), 2):
+            # winners from match i and i+1
+            def winner_of(match_index: int) -> Optional[Entry]:
+                if match_index >= len(prev): return None
+                a, b = prev[match_index]
+                label_a, label_b = entry_to_label(a), entry_to_label(b)
+                sel = winners_map.get(match_index + 1, "")  # 1-based index
+                if sel == label_a: return a
+                if sel == label_b: return b
+                # auto-advance if BYE
+                if a.character.upper() == "BYE": return b
+                if b.character.upper() == "BYE": return a
+                return None
+
+            w1 = winner_of(i)
+            w2 = winner_of(i + 1)
+            next_round.append((w1, w2))
+        rounds.append(next_round)
+        prev = next_round
+    return rounds
+
+def render_bracket_grid(all_rounds: List[List[Tuple[Optional[Entry], Optional[Entry]]]], team_of: Dict[str, str], team_colors: Dict[str, str]):
+    cols = st.columns(len(all_rounds))
+    # legend (team colors) if any team colors present
+    any_team_color = any(team_colors.values())
+    if any_team_color:
+        legend = "  ".join([f"<span class='legend-badge' style='background:{c}'></span>{t}" for t, c in team_colors.items()])
+        st.markdown(f"<div class='small'><b>Legend:</b> {legend}</div>", unsafe_allow_html=True)
+
+    for round_idx, round_pairs in enumerate(all_rounds):
+        with cols[round_idx]:
+            st.markdown(f"<div class='round-title'>Round {round_idx+1}</div>", unsafe_allow_html=True)
+            player_colors: Dict[str, str] = {}
+            for pair in round_pairs:
+                a, b = pair
+                st.markdown("<div class='match-box'>", unsafe_allow_html=True)
+                if a is None:
+                    st.markdown("<div class='name-line tbd'>TBD</div>", unsafe_allow_html=True)
+                else:
+                    st.markdown(render_entry_line(a, team_of, team_colors, player_colors), unsafe_allow_html=True)
+                if b is None:
+                    st.markdown("<div class='name-line tbd'>TBD</div>", unsafe_allow_html=True)
+                else:
+                    st.markdown(render_entry_line(b, team_of, team_colors, player_colors), unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+# ---------------------------- R1 winner UI ----------------------------
+def r1_winner_controls(r1_pairs: List[Tuple[Entry, Entry]]):
     if "r1_winners" not in st.session_state:
         st.session_state.r1_winners = {}
-
-    st.write("### Round 1 Matches")
-    player_colors: Dict[str, str] = {}  # fallback per-player colors for non-teams/none
-    for i, (a, b) in enumerate(bracket, start=1):
-        st.markdown(f"**Match {i}**")
-
-        # Render rows with icons + colored names
-        a_html = render_entry(a, team_of, team_colors, player_colors)
-        b_html = render_entry(b, team_of, team_colors, player_colors)
-        st.markdown(a_html, unsafe_allow_html=True)
-        st.markdown("vs")
-        st.markdown(b_html, unsafe_allow_html=True)
-
-        # Winner radio
-        label_a = f"{a.player} — {a.character}"
-        label_b = f"{b.player} — {b.character}"
-        default_value = st.session_state.r1_winners.get(i, "")
-        idx = 2  # (undecided)
-        if default_value == label_a: idx = 0
-        elif default_value == label_b: idx = 1
-
+    st.write("### Pick Round 1 Winners")
+    for i, (a, b) in enumerate(r1_pairs, start=1):
+        label_a = entry_to_label(a)
+        label_b = entry_to_label(b)
+        prev = st.session_state.r1_winners.get(i, "")
+        if prev == label_a: idx = 0
+        elif prev == label_b: idx = 1
+        else: idx = 2
         choice = st.radio(
-            "Pick winner:",
+            f"Match {i}",
             options=[label_a, label_b, "(undecided)"],
             index=idx,
             key=f"winner_{i}",
             horizontal=True,
         )
         st.session_state.r1_winners[i] = choice if choice != "(undecided)" else ""
-        st.write("---")
 
-    if st.button("💾 Save Round 1 Winners"):
-        winners = [w for w in st.session_state.r1_winners.values() if w]
-        st.success(f"Saved {len(winners)} winner selections.")
-        if winners:
-            st.markdown("**Round 1 Winners:**")
-            for w in winners:
-                st.write("• ", w)
+# ---------------------------- Generate + show ----------------------------
+st.divider()
+col_gen, col_clear = st.columns([2, 1])
 
 with col_gen:
     if st.button("🎲 Generate Bracket", type="primary"):
@@ -395,30 +432,37 @@ with col_gen:
             st.error("Add at least 2 entries (characters).")
         else:
             if rule == "regular":
-                bracket = generate_bracket_regular_or_teams(entries, forbid_same_team=False, team_of={})
+                bracket = generate_bracket_regular(entries)
             elif rule == "groups":
                 bracket = generate_bracket_groups(entries)
-            else:  # teams
-                bracket = generate_bracket_regular_or_teams(entries, forbid_same_team=True, team_of=team_of)
+            elif rule == "teams":
+                bracket = generate_bracket_teams(entries, team_of)
+            else:  # everything
+                bracket = generate_bracket_everything(entries, team_of)
 
-            if bracket is None:
-                st.error("Couldn't build a valid round-1 bracket with those constraints. Try balancing counts or team assignments.")
+            if not bracket:
+                st.error("Couldn't build a valid round-1 bracket with those constraints.")
             else:
+                total_real = len([e for e in entries if e.player != "SYSTEM"])
+                target = next_power_of_two(total_real)
+                need = target - total_real
+                st.success(f"Entries: {total_real} → Target bracket: {target}  (BYEs: {need}) — Mode: {rule}")
+
+                # Persist
                 st.session_state["last_bracket"] = [(a, b) for (a, b) in bracket]
                 st.session_state["last_rule"] = rule
                 st.session_state["last_team_of"] = team_of
                 st.session_state["last_team_colors"] = team_colors
-                show_bracket_and_winner_ui(bracket, rule, team_of, team_colors)
 
-# Persist view on rerun
+# Show current or last bracket with compact full layout
 if "last_bracket" in st.session_state and st.session_state["last_bracket"]:
-    st.info("Showing last generated bracket:")
-    show_bracket_and_winner_ui(
-        st.session_state["last_bracket"],
-        st.session_state.get("last_rule", "regular"),
-        st.session_state.get("last_team_of", {}),
-        st.session_state.get("last_team_colors", {}),
-    )
+    r1_pairs = st.session_state["last_bracket"]
+    st.info("Bracket view (all rounds):")
+    # R1 winner controls (left side beneath)
+    r1_winner_controls(r1_pairs)
+    # Build all rounds from R1 + winners
+    rounds = compute_rounds_pairs(r1_pairs, st.session_state.get("r1_winners", {}))
+    render_bracket_grid(rounds, st.session_state.get("last_team_of", {}), st.session_state.get("last_team_colors", {}))
 
 with col_clear:
     if st.button("🧹 Clear Table"):
@@ -427,4 +471,4 @@ with col_clear:
         st.session_state.pop("r1_winners", None)
         st.rerun()
 
-st.caption("Names are colored by team (in Teams mode) or by unique player color if no team set. BYEs expand to the next power-of-two bracket.")
+st.caption("Tip: Add an 'images/' folder with character icons (e.g., Mario.png) to show icons in the bracket.")
