@@ -71,10 +71,14 @@ def render_name_html(player: str, team_of: Dict[str, str], team_colors: Dict[str
     safe_player = player.replace("<", "&lt;").replace(">", "&gt;")
     return f"<span style='color:{color};font-weight:600'>{safe_player}</span>"
 
-def entry_to_label(e: Entry) -> str:
+def entry_to_label(e):
+    if e is None:
+        return ""
     return f"{e.player} — {e.character}"
 
-def render_entry_line(e: Entry, team_of: Dict[str, str], team_colors: Dict[str, str], player_colors: Dict[str, str]) -> str:
+def render_entry_line(e, team_of, team_colors, player_colors):
+    if e is None:
+        return "<div class='name-line tbd'>TBD</div>"
     if e.character.upper() == "BYE":
         return "<div class='name-line tbd'>BYE</div>"
     icon = get_character_icon_path(e.character)
@@ -338,43 +342,66 @@ table_df = st.data_editor(
 entries = df_to_entries(table_df, clean_rows_flag=clean_rows)
 
 # ---------------------------- Bracket helpers: rounds & grid ----------------------------
-def compute_rounds_pairs(r1_pairs: List[Tuple[Entry, Entry]], winners_map: Dict[int, str]) -> List[List[Tuple[Optional[Entry], Optional[Entry]]]]:
+def compute_rounds_pairs(r1_pairs, winners_map):
     """
     Build rounds from round1 pairs and winner picks (labels in winners_map).
     Returns list of rounds; round[0] is R1.
+    Safe with None entries in later rounds.
     """
-    rounds: List[List[Tuple[Optional[Entry], Optional[Entry]]]] = []
+    rounds = []
     rounds.append([(a, b) for (a, b) in r1_pairs])
 
-    # Determine target and number of rounds
-    total_real = sum(1 for (a, b) in r1_pairs for e in (a, b) if e.player != "SYSTEM")
+    # Determine target size from R1 (count real entries; BYEs still create a pair)
+    total_real = sum(1 for (a, b) in r1_pairs for e in (a, b) if e and e.player != "SYSTEM")
     target = next_power_of_two(total_real)
     num_rounds = int(math.log2(target)) if target >= 2 else 1
 
-    # Create subsequent rounds by propagating winners where picked
     prev = rounds[0]
-    for r in range(1, num_rounds):
-        next_round: List[Tuple[Optional[Entry], Optional[Entry]]] = []
-        for i in range(0, len(prev), 2):
-            # winners from match i and i+1
-            def winner_of(match_index: int) -> Optional[Entry]:
-                if match_index >= len(prev): return None
-                a, b = prev[match_index]
-                label_a, label_b = entry_to_label(a), entry_to_label(b)
-                sel = winners_map.get(match_index + 1, "")  # 1-based index
-                if sel == label_a: return a
-                if sel == label_b: return b
-                # auto-advance if BYE
-                if a.character.upper() == "BYE": return b
-                if b.character.upper() == "BYE": return a
-                return None
 
-            w1 = winner_of(i)
-            w2 = winner_of(i + 1)
+    def winner_of_pair(pair_index, pairs_list):
+        """Return Entry or None for the winner of pairs_list[pair_index]."""
+        if pair_index >= len(pairs_list):
+            return None
+        a, b = pairs_list[pair_index]
+
+        # Handle None / BYE first
+        if a is None and b is None:
+            return None
+        if a is None:
+            # if b exists and isn't BYE -> b wins
+            if b and b.character.upper() != "BYE":
+                return b
+            return None
+        if b is None:
+            if a and a.character.upper() != "BYE":
+                return a
+            return None
+        if a.character.upper() == "BYE" and b.character.upper() != "BYE":
+            return b
+        if b.character.upper() == "BYE" and a.character.upper() != "BYE":
+            return a
+
+        # Only Round 1 has explicit radio selections in winners_map (1-based index)
+        # Later rounds will return None (TBD) unless you add pickers for them too.
+        label_a, label_b = entry_to_label(a), entry_to_label(b)
+        sel = winners_map.get(pair_index + 1, "")
+        if sel == label_a:
+            return a
+        if sel == label_b:
+            return b
+        return None  # undecided
+
+    for _ in range(1, num_rounds):
+        next_round = []
+        for i in range(0, len(prev), 2):
+            w1 = winner_of_pair(i, prev)
+            w2 = winner_of_pair(i + 1, prev)
             next_round.append((w1, w2))
         rounds.append(next_round)
         prev = next_round
+
     return rounds
+
 
 def render_bracket_grid(all_rounds: List[List[Tuple[Optional[Entry], Optional[Entry]]]], team_of: Dict[str, str], team_colors: Dict[str, str]):
     cols = st.columns(len(all_rounds))
