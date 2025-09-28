@@ -301,11 +301,6 @@ def df_to_entries(df: pd.DataFrame, clean_rows_flag: bool) -> List[Entry]:
 # ---------------------------- State: entries table ----------------------------
 if "table_df" not in st.session_state:
     st.session_state.table_df = pd.DataFrame([
-        {"Player": "You", "Character": "Mario"},
-        {"Player": "You", "Character": "Link"},
-        {"Player": "Friend1", "Character": "Kirby"},
-        {"Player": "Friend1", "Character": "Fox"},
-        {"Player": "Friend2", "Character": "Samus"},
     ])
 
 if build_clicked:
