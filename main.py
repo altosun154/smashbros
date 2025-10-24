@@ -633,7 +633,8 @@ else: # Bracket Generator Content (Original Code, wrapped)
             else:
                 if rule == "regular":
                     bracket = generate_bracket_regular(entries)
-                else:  // teams
+                # Corrected: Use '#' for Python comments
+                else:  # teams
                     bracket = generate_bracket_teams(entries, team_of)
 
                 if not bracket:
@@ -649,7 +650,8 @@ else: # Bracket Generator Content (Original Code, wrapped)
                     st.session_state["last_team_of"] = team_of if rule == "teams" else {}
                     st.session_state["last_team_colors"] = team_colors if rule == "teams" else {}
 
-    // Persist & render compact full bracket
+    # Corrected: Use '#' for Python comments
+    # Persist & render compact full bracket
     if "last_bracket" in st.session_state and st.session_state["last_bracket"]:
         r1_pairs = st.session_state["last_bracket"]
         if st.session_state.get("last_rule") == "teams":
