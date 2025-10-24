@@ -441,6 +441,7 @@ with st.sidebar:
     else: # st.session_state.page == "Round Robin"
         # Since the RR module needs player colors initialized, we must capture players here too
         st.header("Players")
+        # --- FIX: Use the 'players_multiline' key to keep data persistent across modes ---
         st.text_area(
             "Enter player names (one per line)",
             value=st.session_state.get("players_multiline", default_players),
@@ -455,6 +456,10 @@ with st.sidebar:
         
     # Set the general player list based on which control was active
     if st.session_state.page == "Bracket Generator":
+        # Ensure the RR text area updates the primary session state variable on switch
+        if "players_multiline" in st.session_state and "players_multiline_rr" in st.session_state:
+             st.session_state.players_multiline = st.session_state.players_multiline_rr
+             
         st.session_state.players_list = [p.strip() for p in st.session_state.players_multiline.splitlines() if p.strip()]
     elif st.session_state.page == "Round Robin":
         st.session_state.players_list = [p.strip() for p in st.session_state.players_multiline_rr.splitlines() if p.strip()]
@@ -628,7 +633,7 @@ else: # Bracket Generator Content (Original Code, wrapped)
             else:
                 if rule == "regular":
                     bracket = generate_bracket_regular(entries)
-                else:  # teams
+                else:  // teams
                     bracket = generate_bracket_teams(entries, team_of)
 
                 if not bracket:
@@ -644,7 +649,7 @@ else: # Bracket Generator Content (Original Code, wrapped)
                     st.session_state["last_team_of"] = team_of if rule == "teams" else {}
                     st.session_state["last_team_colors"] = team_colors if rule == "teams" else {}
 
-    # Persist & render compact full bracket
+    // Persist & render compact full bracket
     if "last_bracket" in st.session_state and st.session_state["last_bracket"]:
         r1_pairs = st.session_state["last_bracket"]
         if st.session_state.get("last_rule") == "teams":
