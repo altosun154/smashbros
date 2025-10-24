@@ -41,6 +41,11 @@ if "rr_results" not in st.session_state:
     
 if "rr_records" not in st.session_state:
     st.session_state.rr_records = {}
+    
+# Primary list of players (default value)
+if "players_multiline" not in st.session_state:
+    st.session_state.players_multiline = "You\nFriend1\nFriend2"
+
 
 # The title is now conditional based on the selected page
 if st.session_state.page == "Bracket Generator":
@@ -238,7 +243,8 @@ def generate_round_robin_schedule(players: List[str]) -> List[Tuple[str, str]]:
 def update_round_robin_records():
     """Recalculates records based on rr_results."""
     # Ensure rr_records is initialized for all current players
-    players_in_state_raw = st.session_state.get("players_multiline_rr", st.session_state.get("players_multiline", "")).splitlines()
+    # FIX: Use the primary players_multiline key as the source of truth
+    players_in_state_raw = st.session_state.get("players_multiline", "").splitlines()
     players_in_state = [p.strip() for p in players_in_state_raw if p.strip() and p.strip() != 'BYE']
     
     records = {player: {"Wins": 0, "Losses": 0} for player in players_in_state}
@@ -350,7 +356,7 @@ def show_round_robin_page(players: List[str]):
     if st.button("🔄 Reset All Round Robin Records"):
         st.session_state["rr_results"] = {}
         # Re-initialize records based on current players
-        current_players = [p.strip() for p in st.session_state.get("players_multiline_rr", st.session_state.get("players_multiline", "")).splitlines() if p.strip() != 'BYE']
+        current_players = [p.strip() for p in st.session_state.get("players_multiline", "").splitlines() if p.strip() != 'BYE']
         st.session_state["rr_records"] = {player: {"Wins": 0, "Losses": 0} for player in current_players}
         st.session_state.pop("rr_schedule", None)
         st.rerun()
@@ -368,8 +374,8 @@ with st.sidebar:
     st.divider()
     
     # --- Shared Player List Handling ---
-    default_players = "You\nFriend1\nFriend2"
-    
+    default_players = st.session_state.players_multiline # Use the persistent value
+
     if st.session_state.page == "Bracket Generator":
         st.header("Rule Set")
         rule = st.selectbox(
@@ -385,16 +391,15 @@ with st.sidebar:
 
         st.divider()
         st.header("Players")
-        # Use a consistent key for the players text area when in Bracket mode
-        players_multiline = st.text_area(
+        # Use primary key 'players_multiline'
+        players_multiline_input = st.text_area(
             "Enter player names (one per line)",
-            value=st.session_state.get("players_multiline", default_players),
+            value=default_players,
             height=140,
             key="players_multiline", 
             help="These names populate the Player dropdown."
         )
-        players = [p.strip() for p in players_multiline.splitlines() if p.strip()]
-        # st.session_state["players_multiline"] is updated implicitly by the key
+        players = [p.strip() for p in players_multiline_input.splitlines() if p.strip()]
 
         # Teams UI only in Teams mode
         team_of: Dict[str, str] = {}
@@ -439,32 +444,22 @@ with st.sidebar:
         clean_rows = st.checkbox("Remove empty rows", value=True)
     
     else: # st.session_state.page == "Round Robin"
-        # Since the RR module needs player colors initialized, we must capture players here too
         st.header("Players")
-        # --- FIX: Use the 'players_multiline' key to keep data persistent across modes ---
-        st.text_area(
+        # Use primary key 'players_multiline' here too. The state is synchronized across the two view inputs.
+        players_multiline_input = st.text_area(
             "Enter player names (one per line)",
-            value=st.session_state.get("players_multiline", default_players),
+            value=default_players,
             height=140,
-            key="players_multiline_rr", # Unique key for RR player input
+            key="players_multiline", 
             help="These names define the participants for Round Robin."
         )
-        players = [p.strip() for p in st.session_state.players_multiline_rr.splitlines() if p.strip()]
+        players = [p.strip() for p in players_multiline_input.splitlines() if p.strip()]
         
         # Initialize default values needed by the Bracket logic if it runs next
         rule, team_of, team_colors, chars_per_person, build_clicked, shuffle_within_player, auto_fill_clicked, clean_rows = "regular", {}, {}, 1, False, True, False, True
         
-    # Set the general player list based on which control was active
-    if st.session_state.page == "Bracket Generator":
-        # Ensure the RR text area updates the primary session state variable on switch
-        if "players_multiline" in st.session_state and "players_multiline_rr" in st.session_state:
-             st.session_state.players_multiline = st.session_state.players_multiline_rr
-             
-        st.session_state.players_list = [p.strip() for p in st.session_state.players_multiline.splitlines() if p.strip()]
-    elif st.session_state.page == "Round Robin":
-        st.session_state.players_list = [p.strip() for p in st.session_state.players_multiline_rr.splitlines() if p.strip()]
-    else:
-        st.session_state.players_list = []
+    # Final list used by main script body
+    st.session_state.players_list = players
 
 
 # ---------------------------- MAIN CONTENT FLOW ----------------------------
