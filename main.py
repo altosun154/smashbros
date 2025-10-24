@@ -29,7 +29,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------------------- GLOBAL STATE & NAVIGATION SETUP (NEW) ----------------------------
+# ---------------------------- GLOBAL STATE & NAVIGATION SETUP ----------------------------
 if "page" not in st.session_state:
     st.session_state.page = "Bracket Generator"
     
@@ -52,146 +52,148 @@ else:
 # ---------------------------- Data types ----------------------------
 @dataclass(frozen=True)
 class Entry:
-    player: str
-    character: str
+    player: str
+    character: str
 
 # ---------------------------- Power-of-two helpers ----------------------------
 def next_power_of_two(n: int) -> int:
-    if n <= 1:
-        return 1
-    return 1 << (n - 1).bit_length()
+    if n <= 1:
+        return 1
+    return 1 << (n - 1).bit_length()
 
 def byes_needed(n: int) -> int:
-    return max(0, next_power_of_two(n) - n)
+    return max(0, next_power_of_two(n) - n)
 
 # ---------------------------- Icons & colors ----------------------------
 ICON_DIR = os.path.join(os.path.dirname(__file__), "images")
 
 def get_character_icon_path(char_name: str) -> Optional[str]:
-    if not char_name:
-        return None
-    fname = f"{char_name.title().replace(' ', '_')}.png"
-    path = os.path.join(ICON_DIR, fname)
-    return path if os.path.exists(path) else None
+    if not char_name:
+        return None
+    fname = f"{char_name.title().replace(' ', '_')}.png"
+    path = os.path.join(ICON_DIR, fname)
+    return path if os.path.exists(path) else None
 
 TEAM_COLOR_FALLBACKS = [
-    "#E91E63", "#3F51B5", "#009688", "#FF9800", "#9C27B0",
-    "#4CAF50", "#2196F3", "#FF5722", "#795548", "#607D8B"
+    "#E91E63", "#3F51B5", "#009688", "#FF9800", "#9C27B0",
+    "#4CAF50", "#2196F3", "#FF5722", "#795548", "#607D8B"
 ]
 PLAYER_FALLBACKS = [
-    "#FF6F61", "#6B5B95", "#88B04B", "#F7CAC9", "#92A8D1",
-    "#955251", "#B565A7", "#009B77", "#DD4124", "#45B8AC"
+    "#FF6F61", "#6B5B95", "#88B04B", "#F7CAC9", "#92A8D1",
+    "#955251", "#B565A7", "#009B77", "#DD4124", "#45B8AC"
 ]
 
 def render_name_html(player: str, team_of: Dict[str, str], team_colors: Dict[str, str], player_colors: Dict[str, str]) -> str:
-    t = team_of.get(player, "")
-    if t and team_colors.get(t):
-        color = team_colors[t]
-    else:
-        # MODIFIED: Use and update persistent session state color for individual player coloring
-        color = st.session_state.player_colors.setdefault(player, PLAYER_FALLBACKS[len(st.session_state.player_colors) % len(PLAYER_FALLBACKS)])
-    safe_player = player.replace("<", "&lt;").replace(">", "&gt;")
-    return f"<span style='color:{color};font-weight:600'>{safe_player}</span>"
+    t = team_of.get(player, "")
+    if t and team_colors.get(t):
+        color = team_colors[t]
+    else:
+        # MODIFIED: Use and update persistent session state color for individual player coloring
+        # Ensure the fallback selection is based on the current size of the *persistent* color dictionary
+        color = st.session_state.player_colors.setdefault(player, PLAYER_FALLBACKS[len(st.session_state.player_colors) % len(PLAYER_FALLBACKS)])
+    safe_player = player.replace("<", "&lt;").replace(">", "&gt;")
+    return f"<span style='color:{color};font-weight:600'>{safe_player}</span>"
 
 def render_entry_line(e: Optional[Entry], team_of: Dict[str, str], team_colors: Dict[str, str], player_colors: Dict[str, str]) -> str:
-    if e is None:
-        return "<div class='name-line tbd'>TBD</div>"
-    if e.character.upper() == "BYE":
-        return "<div class='name-line tbd'>BYE</div>"
-    icon = get_character_icon_path(e.character)
-    name_html = render_name_html(e.player, team_of, team_colors, player_colors)
-    char_safe = e.character.replace("<", "&lt;").replace(">", "&gt;")
-    if icon:
-        return f"<div class='name-line'><img src='file://{icon}' width='24'/> <b>{char_safe}</b> ({name_html})</div>"
-    else:
-        return f"<div class='name-line'><b>{char_safe}</b> ({name_html})</div>"
+    if e is None:
+        return "<div class='name-line tbd'>TBD</div>"
+    if e.character.upper() == "BYE":
+        return "<div class='name-line tbd'>BYE</div>"
+    icon = get_character_icon_path(e.character)
+    # MODIFIED: Pass the session state player_colors dictionary for consistent color lookup
+    name_html = render_name_html(e.player, team_of, team_colors, st.session_state.player_colors)
+    char_safe = e.character.replace("<", "&lt;").replace(">", "&gt;")
+    if icon:
+        return f"<div class='name-line'><img src='file://{icon}' width='24'/> <b>{char_safe}</b> ({name_html})</div>"
+    else:
+        return f"<div class='name-line'><b>{char_safe}</b> ({name_html})</div>"
 
 def entry_to_label(e: Optional[Entry]) -> str:
-    if e is None: return ""
-    return f"{e.player} — {e.character}"
+    if e is None: return ""
+    return f"{e.player} — {e.character}"
 
 # ---------------------------- Balanced generator (Regular core) ----------------------------
 def pick_from_lowest_tally(cands: List[Entry], tally: Dict[str, int], exclude_player: Optional[str] = None) -> Optional[Entry]:
-    pool = [e for e in cands if e.player != exclude_player]
-    if not pool:
-        return None
-    m = min(tally.get(e.player, 0) for e in pool)
-    lowest = [e for e in pool if tally.get(e.player, 0) == m]
-    return random.choice(lowest)
+    pool = [e for e in cands if e.player != exclude_player]
+    if not pool:
+        return None
+    m = min(tally.get(e.player, 0) for e in pool)
+    lowest = [e for e in pool if tally.get(e.player, 0) == m]
+    return random.choice(lowest)
 
 def generate_bracket_balanced(
-    entries: List[Entry],
-    *,
-    forbid_same_team: bool = False,
-    team_of: Optional[Dict[str, str]] = None
+    entries: List[Entry],
+    *,
+    forbid_same_team: bool = False,
+    team_of: Optional[Dict[str, str]] = None
 ) -> List[Tuple[Entry, Entry]]:
-    """
-    Balanced-random pairing:
-      - no self-match,
-      - optional: forbid same-team,
-      - fills BYEs to next power of two,
-      - uses per-player tallies for fairness.
-    """
-    team_of = team_of or {}
-    base = [e for e in entries if e.player != "SYSTEM"]
-    need = byes_needed(len(base))
+    """
+    Balanced-random pairing:
+      - no self-match,
+      - optional: forbid same-team,
+      - fills BYEs to next power of two,
+      - uses per-player tallies for fairness.
+    """
+    team_of = team_of or {}
+    base = [e for e in entries if e.player != "SYSTEM"]
+    need = byes_needed(len(base))
 
-    bag = base.copy()
-    random.shuffle(bag)
-    tally: Dict[str, int] = {}
-    pairs: List[Tuple[Entry, Entry]] = []
+    bag = base.copy()
+    random.shuffle(bag)
+    tally: Dict[str, int] = {}
+    pairs: List[Tuple[Entry, Entry]] = []
 
-    # Use some BYEs first if needed
-    while need > 0 and bag:
-        a = pick_from_lowest_tally(bag, tally)
-        bag.remove(a)
-        pairs.append((a, Entry("SYSTEM", "BYE")))
-        tally[a.player] = tally.get(a.player, 0) + 1
-        need -= 1
+    # Use some BYEs first if needed
+    while need > 0 and bag:
+        a = pick_from_lowest_tally(bag, tally)
+        bag.remove(a)
+        pairs.append((a, Entry("SYSTEM", "BYE")))
+        tally[a.player] = tally.get(a.player, 0) + 1
+        need -= 1
 
-    def pick_opponent(a: Entry, pool: List[Entry]) -> Optional[Entry]:
-        pool2 = [x for x in pool if x.player != a.player]
-        if forbid_same_team:
-            ta = team_of.get(a.player, "")
-            if ta:
-                pool2 = [x for x in pool2 if team_of.get(x.player, "") != ta]
-        if not pool2:
-            return None
-        m = min(tally.get(x.player, 0) for x in pool2)
-        lowest = [x for x in pool2 if tally.get(x.player, 0) == m]
-        return random.choice(lowest)
+    def pick_opponent(a: Entry, pool: List[Entry]) -> Optional[Entry]:
+        pool2 = [x for x in pool if x.player != a.player]
+        if forbid_same_team:
+            ta = team_of.get(a.player, "")
+            if ta:
+                pool2 = [x for x in pool2 if team_of.get(x.player, "") != ta]
+        if not pool2:
+            return None
+        m = min(tally.get(x.player, 0) for x in pool2)
+        lowest = [x for x in pool2 if tally.get(x.player, 0) == m]
+        return random.choice(lowest)
 
-    while len(bag) >= 2:
-        a = pick_from_lowest_tally(bag, tally)
-        bag.remove(a)
-        b = pick_opponent(a, bag)
-        if b is None:
-            # try turn this into a BYE if adding one still gets us to power-of-two
-            if byes_needed(len(bag)+1) > 0:
-                pairs.append((a, Entry("SYSTEM", "BYE")))
-                tally[a.player] += 1 if a.player in tally else 1
-            else:
-                bag.append(a)
-                random.shuffle(bag)
-                if len(bag) == 1:
-                    break
-            continue
-        bag.remove(b)
-        pairs.append((a, b))
-        tally[a.player] = tally.get(a.player, 0) + 1
-        tally[b.player] = tally.get(b.player, 0) + 1
+    while len(bag) >= 2:
+        a = pick_from_lowest_tally(bag, tally)
+        bag.remove(a)
+        b = pick_opponent(a, bag)
+        if b is None:
+            # try turn this into a BYE if adding one still gets us to power-of-two
+            if byes_needed(len(bag)+1) > 0:
+                pairs.append((a, Entry("SYSTEM", "BYE")))
+                tally[a.player] += 1 if a.player in tally else 1
+            else:
+                bag.append(a)
+                random.shuffle(bag)
+                if len(bag) == 1:
+                    break
+            continue
+        bag.remove(b)
+        pairs.append((a, b))
+        tally[a.player] = tally.get(a.player, 0) + 1
+        tally[b.player] = tally.get(b.player, 0) + 1
 
-    if bag:  # odd leftover
-        pairs.append((bag[0], Entry("SYSTEM", "BYE")))
-    return pairs
+    if bag:  # odd leftover
+        pairs.append((bag[0], Entry("SYSTEM", "BYE")))
+    return pairs
 
 def generate_bracket_regular(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
-    # Regular is the balanced generator (what "everything/groups" did)
-    return generate_bracket_balanced(entries)
+    # Regular is the balanced generator (what "everything/groups" did)
+    return generate_bracket_balanced(entries)
 
 def generate_bracket_teams(entries: List[Entry], team_of: Dict[str, str]) -> List[Tuple[Entry, Entry]]:
-    # Same as regular but forbids same-team R1
-    return generate_bracket_balanced(entries, forbid_same_team=True, team_of=team_of)
+    # Same as regular but forbids same-team R1
+    return generate_bracket_balanced(entries, forbid_same_team=True, team_of=team_of)
 
 # ---------------------------- ROUND ROBIN LOGIC (NEW) ----------------------------
 
@@ -236,8 +238,8 @@ def generate_round_robin_schedule(players: List[str]) -> List[Tuple[str, str]]:
 def update_round_robin_records():
     """Recalculates records based on rr_results."""
     # Ensure rr_records is initialized for all current players
-    players_in_state = st.session_state.get("players_multiline", "").splitlines()
-    players_in_state = [p.strip() for p in players_in_state if p.strip() != 'BYE']
+    players_in_state = st.session_state.get("players_multiline_rr", st.session_state.get("players_multiline", "")).splitlines()
+    players_in_state = [p.strip() for p in players_in_state if p.strip() and p.strip() != 'BYE']
     
     records = {player: {"Wins": 0, "Losses": 0} for player in players_in_state}
     
@@ -247,40 +249,47 @@ def update_round_robin_records():
             
         # Match ID format: Player A|Player B
         p1, p2 = match_id.split('|')
-        loser = p2 if winner == p1 else p1
         
-        if winner in records:
-            records[winner]["Wins"] += 1
-        if loser in records:
-            records[loser]["Losses"] += 1
+        # Only process if both players are currently in the list (handles player removal)
+        if p1 in players_in_state and p2 in players_in_state:
+            loser = p2 if winner == p1 else p1
+            
+            if winner in records:
+                records[winner]["Wins"] += 1
+            if loser in records:
+                records[loser]["Losses"] += 1
             
     st.session_state.rr_records = records
 
 
 def show_round_robin_page(players: List[str]):
-    st.markdown("---")
     st.subheader("Round Robin Match Results Input")
     
-    if len(players) < 2:
+    # Filter out BYE if present in the player list used for UI (shouldn't be, but safe check)
+    clean_players = [p for p in players if p != 'BYE']
+    
+    if len(clean_players) < 2:
         st.error("Please enter at least two players in the sidebar to generate a Round Robin tournament.")
         return
 
     # 1. Generate/Get Schedule
-    schedule = generate_round_robin_schedule(players)
+    schedule = generate_round_robin_schedule(clean_players)
 
     st.info(f"Total Matches to Play: **{len(schedule)}**")
     
     # Recalculate records first
     update_round_robin_records()
     
+    # Use st.columns(3) for match inputs
     cols = st.columns(3)
     
     for i, (p1, p2) in enumerate(schedule, start=1):
         match_id = f"{p1}|{p2}"
         
         # Determine the color-coded labels for the title
-        p1_color = st.session_state.player_colors.get(p1, "#000000") # Use fallback if not set
-        p2_color = st.session_state.player_colors.get(p2, "#000000")
+        # Ensure player colors are set if they haven't been in Bracket Generator mode yet
+        p1_color = st.session_state.player_colors.setdefault(p1, PLAYER_FALLBACKS[len(st.session_state.player_colors) % len(PLAYER_FALLBACKS)])
+        p2_color = st.session_state.player_colors.setdefault(p2, PLAYER_FALLBACKS[len(st.session_state.player_colors) % len(PLAYER_FALLBACKS)])
         
         p1_html = f'<span style="color:{p1_color}; font-weight: bold;">{p1}</span>'
         p2_html = f'<span style="color:{p2_color}; font-weight: bold;">{p2}</span>'
@@ -341,7 +350,7 @@ def show_round_robin_page(players: List[str]):
     if st.button("🔄 Reset All Round Robin Records"):
         st.session_state["rr_results"] = {}
         # Re-initialize records based on current players
-        current_players = [p.strip() for p in st.session_state.get("players_multiline", "").splitlines() if p.strip() != 'BYE']
+        current_players = [p.strip() for p in st.session_state.get("players_multiline_rr", st.session_state.get("players_multiline", "")).splitlines() if p.strip() != 'BYE']
         st.session_state["rr_records"] = {player: {"Wins": 0, "Losses": 0} for player in current_players}
         st.session_state.pop("rr_schedule", None)
         st.rerun()
@@ -357,60 +366,67 @@ with st.sidebar:
     )
     
     st.divider()
-
-    # The rest of the sidebar controls are nested within this conditional block
+    
+    # --- Shared Player List Handling ---
+    default_players = "You\nFriend1\nFriend2"
+    
     if st.session_state.page == "Bracket Generator":
         st.header("Rule Set")
         rule = st.selectbox(
-            "Choose mode",
-            options=["regular", "teams"],
-            index=0,
-            help=(
-                "regular: balanced random (no self-matches), fills BYEs to next power of 2.\n"
-                "teams: regular + forbids same-team matches in round 1 (names colored by team)."
-            )
-        )
+            "Choose mode",
+            options=["regular", "teams"],
+            index=0,
+            key="rule_select", # Added key for state management
+            help=(
+                "regular: balanced random (no self-matches), fills BYEs to next power of 2.\n"
+                "teams: regular + forbids same-team matches in round 1 (names colored by team)."
+            )
+        )
 
         st.divider()
         st.header("Players")
-        default_players = "You\nFriend1\nFriend2"
+        # Use a consistent key for the players text area when in Bracket mode
         players_multiline = st.text_area(
-            "Enter player names (one per line)",
-            value=st.session_state.get("players_multiline", default_players),
-            height=140,
-            help="These names populate the Player dropdown."
-        )
+            "Enter player names (one per line)",
+            value=st.session_state.get("players_multiline", default_players),
+            height=140,
+            key="players_multiline", 
+            help="These names populate the Player dropdown."
+        )
         players = [p.strip() for p in players_multiline.splitlines() if p.strip()]
-        st.session_state["players_multiline"] = players_multiline
+        # st.session_state["players_multiline"] is updated implicitly by the key
 
         # Teams UI only in Teams mode
         team_of: Dict[str, str] = {}
         team_colors: Dict[str, str] = {}
         if rule == "teams":
-            st.divider()
-            st.header("Teams & Colors")
-            team_names_input = st.text_input(
-                "Team labels (comma separated)",
-                value="Red, Blue",
-                help="Example: Red, Blue, Green"
-            )
-            team_labels = [t.strip() for t in team_names_input.split(",") if t.strip()]
-            if not team_labels:
-                team_labels = ["Team A", "Team B"]
+            st.divider()
+            st.header("Teams & Colors")
+            team_names_input = st.text_input(
+                "Team labels (comma separated)",
+                value="Red, Blue",
+                key="team_names_input", # Added key for state management
+                help="Example: Red, Blue, Green"
+            )
+            team_labels = [t.strip() for t in team_names_input.split(",") if t.strip()]
+            if not team_labels:
+                team_labels = ["Team A", "Team B"]
 
-            st.caption("Pick a color for each team:")
-            for i, t in enumerate(team_labels):
-                default = TEAM_COLOR_FALLBACKS[i % len(TEAM_COLOR_FALLBACKS)]
-                team_colors[t] = st.color_picker(f"{t} color", value=default, key=f"team_color_{t}")
+            st.caption("Pick a color for each team:")
+            for i, t in enumerate(team_labels):
+                default = TEAM_COLOR_FALLBACKS[i % len(TEAM_COLOR_FALLBACKS)]
+                team_colors[t] = st.color_picker(f"{t} color", value=default, key=f"team_color_{t}")
 
-            st.caption("Assign each player to a team:")
-            for p in players:
-                team_of[p] = st.selectbox(f"{p}", options=["(none)"] + team_labels, key=f"team_{p}")
-            team_of = {p: (t if t != "(none)" else "") for p, t in team_of.items()}
+            st.caption("Assign each player to a team:")
+            for p in players:
+                team_of[p] = st.selectbox(f"{p}", options=["(none)"] + team_labels, key=f"team_{p}")
+            team_of = {p: (t if t != "(none)" else "") for p, t in team_of.items()}
 
-        st.divider()
+            st.divider()
+        
+        # Bracket-specific controls
         st.header("Characters per player")
-        chars_per_person = st.number_input("How many per player?", min_value=1, max_value=50, value=2, step=1)
+        chars_per_person = st.number_input("How many per player?", min_value=1, max_value=50, value=2, step=1, key="chars_per_person")
 
         st.divider()
         st.subheader("Build / Fill")
@@ -422,34 +438,34 @@ with st.sidebar:
         st.header("General")
         clean_rows = st.checkbox("Remove empty rows", value=True)
     
-    # NEW: Sidebar section for players in Round Robin
     else: # st.session_state.page == "Round Robin"
+        # Since the RR module needs player colors initialized, we must capture players here too
         st.header("Players")
-        default_players = "You\nFriend1\nFriend2"
         st.text_area(
-            "Enter player names (one per line)",
-            value=st.session_state.get("players_multiline", default_players),
-            height=140,
-            key="players_multiline_rr", # Use a unique key
-            help="These names define the participants for Round Robin."
-        )
+            "Enter player names (one per line)",
+            value=st.session_state.get("players_multiline", default_players),
+            height=140,
+            key="players_multiline_rr", # Unique key for RR player input
+            help="These names define the participants for Round Robin."
+        )
         players = [p.strip() for p in st.session_state.players_multiline_rr.splitlines() if p.strip()]
         
-        # Initialize variables needed for the original main content block if it's run
+        # Initialize default values needed by the Bracket logic if it runs next
         rule, team_of, team_colors, chars_per_person, build_clicked, shuffle_within_player, auto_fill_clicked, clean_rows = "regular", {}, {}, 1, False, True, False, True
         
-    # Ensure players variable is consistent for the whole script flow
+    # Set the general player list based on which control was active
     if st.session_state.page == "Bracket Generator":
-        # Players already defined above
-        pass 
+        st.session_state.players_list = [p.strip() for p in st.session_state.players_multiline.splitlines() if p.strip()]
     elif st.session_state.page == "Round Robin":
-        # Players already defined in the RR block
-        pass
+        st.session_state.players_list = [p.strip() for p in st.session_state.players_multiline_rr.splitlines() if p.strip()]
     else:
-        # Default players if page state is missing (shouldn't happen with the radio control)
-        players = [p.strip() for p in st.session_state.get("players_multiline", default_players).splitlines() if p.strip()]
+        st.session_state.players_list = []
+
 
 # ---------------------------- MAIN CONTENT FLOW (MODIFIED) ----------------------------
+# Use st.session_state.players_list for consistent access outside the sidebar
+players = st.session_state.players_list
+
 
 if st.session_state.page == "Round Robin":
     show_round_robin_page(players)
