@@ -47,13 +47,6 @@ if "players_multiline" not in st.session_state:
     st.session_state.players_multiline = "You\nFriend1\nFriend2"
 
 
-# The title is now conditional based on the selected page
-if st.session_state.page == "Bracket Generator":
-    st.title("🎮 Smash Bracket — Regular & Teams")
-else:
-    st.title("🗂️ Round Robin Scheduler & Leaderboard")
-
-
 # ---------------------------- Data types ----------------------------
 @dataclass(frozen=True)
 class Entry:
@@ -365,11 +358,14 @@ def show_round_robin_page(players: List[str]):
 with st.sidebar:
     st.header("App Navigation")
     # NEW: Control which page is shown
-    st.session_state.page = st.radio(
+    selected_page = st.radio(
         "Switch View", 
         options=["Bracket Generator", "Round Robin"], 
-        index=0
+        index=["Bracket Generator", "Round Robin"].index(st.session_state.page), # Use current state to set index
+        key="page_radio" # Use a key for the radio button
     )
+    # Immediately update session state page based on user interaction
+    st.session_state.page = selected_page
     
     st.divider()
     
@@ -463,6 +459,12 @@ with st.sidebar:
 
 
 # ---------------------------- MAIN CONTENT FLOW (MODIFIED) ----------------------------
+# The title is now conditional based on the selected page (moved outside of the sidebar)
+if st.session_state.page == "Bracket Generator":
+    st.title("🎮 Smash Bracket — Regular & Teams")
+else:
+    st.title("🗂️ Round Robin Scheduler & Leaderboard")
+    
 # Use st.session_state.players_list for consistent access outside the sidebar
 players = st.session_state.players_list
 
@@ -470,7 +472,7 @@ players = st.session_state.players_list
 if st.session_state.page == "Round Robin":
     show_round_robin_page(players)
 
-else: # Bracket Generator Content (Original Code, wrapped)
+else: # Bracket Generator Content 
     # ---------------------------- Table helpers ----------------------------
     def build_entries_df(players: List[str], k: int) -> pd.DataFrame:
         rows = []
