@@ -462,7 +462,7 @@ with st.sidebar:
     st.session_state.players_list = players
 
 
-# ---------------------------- MAIN CONTENT FLOW ----------------------------
+# ---------------------------- MAIN CONTENT FLOW (MODIFIED) ----------------------------
 # Use st.session_state.players_list for consistent access outside the sidebar
 players = st.session_state.players_list
 
@@ -530,6 +530,7 @@ else: # Bracket Generator Content (Original Code, wrapped)
             lambda p: p if p in players else (players[0] if p == "" else p)
         )
 
+    # --- START OF BRACKET GENERATOR VISIBLE CONTENT ---
     st.subheader("Entries")
     table_df = st.data_editor(
         st.session_state.table_df,
@@ -666,3 +667,4 @@ else: # Bracket Generator Content (Original Code, wrapped)
             st.rerun()
 
     st.caption("Regular uses balanced randomization; Teams forbids same-team R1. Add an 'images/' folder with character PNGs to show icons.")
+    # --- END OF BRACKET GENERATOR VISIBLE CONTENT ---
