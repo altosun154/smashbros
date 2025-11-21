@@ -118,7 +118,68 @@ def pick_from_lowest_tally(cands: List[Entry], tally: Dict[str, int], exclude_pl
     m = min(tally.get(e.player, 0) for e in pool)
     lowest = [e for e in pool if tally.get(e.player, 0) == m]
     return random.choice(lowest)
+# Place this function near generate_bracket_balanced and generate_bracket_regular
 
+def generate_bracket_constrained_core(
+    entries: List[Entry], 
+    max_repeats: int = 2
+) -> List[Tuple[Entry, Entry]]:
+    """
+    Core function to generate pairings while attempting to limit 
+    the number of times any two players match (based on player names). 
+    It pairs sequentially and adds a single BYE if needed, but does NOT pad to power of two.
+    """
+    # Filter out entries that are already BYE (though they shouldn't be here)
+    base_entries = [e for e in entries if e.character.upper() != "BYE"]
+    
+    # 1. Create a working list and shuffle
+    bag = base_entries.copy()
+    random.shuffle(bag)
+
+    match_counts: Dict[Tuple[str, str], int] = {}  # Tracks matchups between player NAMES
+    bracket: List[Tuple[Entry, Entry]] = []
+
+    def key(a: str, b: str) -> Tuple[str, str]:
+        # Always sort the player names to ensure consistency
+        return tuple(sorted([a, b]))
+
+    def has_played_too_much(p1_name: str, p2_name: str) -> bool:
+        return match_counts.get(key(p1_name, p2_name), 0) >= max_repeats
+
+    def record(p1_name: str, p2_name: str):
+        k = key(p1_name, p2_name)
+        match_counts[k] = match_counts.get(k, 0) + 1
+
+    i = 0
+    while i < len(bag) - 1:
+        e1 = bag[i]
+        e2 = bag[i + 1]
+        
+        # If these two players have matched too many times, try swapping
+        if has_played_too_much(e1.player, e2.player):
+            
+            # Find a valid swap partner for the second entry (e2)
+            for j in range(i + 2, len(bag)):
+                e_swap = bag[j]
+                
+                # Check if e1 vs e_swap is OK
+                if not has_played_too_much(e1.player, e_swap.player):
+                    # Perform the swap
+                    bag[i + 1], bag[j] = bag[j], bag[i + 1]
+                    e2 = bag[i + 1]  # Update e2 to the new partner
+                    break
+            
+        # Add the final pairing
+        bracket.append((e1, e2))
+        record(e1.player, e2.player)
+        i += 2
+
+    # Handle odd leftover entry by assigning a single BYE
+    if len(bag) % 2 != 0:
+        last_entry = bag[-1]
+        bracket.append((last_entry, Entry("SYSTEM", "BYE")))
+        
+    return bracket
 def generate_bracket_balanced(
     entries: List[Entry],
     *,
@@ -185,9 +246,77 @@ def generate_bracket_balanced(
         pairs.append((bag[0], Entry("SYSTEM", "BYE")))
     return pairs
 
+# ---------------------------- Balanced generator (Regular core) ----------------------------
+# ... (existing pick_from_lowest_tally, next_power_of_two, byes_needed, etc. remain) ...
+
+# NOTE: The generate_bracket_balanced and generate_bracket_teams functions remain UNCHANGED
+# because they are used by the 'teams' mode.
+
 def generate_bracket_regular(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
-    # Regular is the balanced generator (what "everything/groups" did)
-    return generate_bracket_balanced(entries)
+    """
+    Regular mode uses the constrained pairing logic (max_repeats=2) 
+    and then ensures the initial pairing includes BYEs to pad to the next power of two.
+    """
+    base_entries = [e for e in entries if e.player != "SYSTEM"]
+    need_byes = byes_needed(len(base_entries))
+    
+    # Run the core logic to get initial pairings with minimal repeats (up to 2)
+    # The core logic handles a single BYE if necessary for an odd number.
+    r1_pairs = generate_bracket_constrained_core(base_entries, max_repeats=2)
+    
+    # ------------------------------------------------------------------
+    # Now, add additional BYEs to reach the next power of two
+    # We must ensure no real player is matched against a BYE twice.
+    # Since the constrained core doesn't explicitly guarantee a minimum 
+    # tally/fairness like the balanced function, a simpler approach is best here.
+    # We will use the 'bag' approach from the balanced generator for the additional BYEs.
+    # ------------------------------------------------------------------
+    
+    if need_byes > 0:
+        # Separate the players already matched against a BYE
+        already_bye = set()
+        final_pairs = []
+        temp_bag = []
+        
+        # Pull out any single BYE added by the core function
+        if r1_pairs and r1_pairs[-1][1] == Entry("SYSTEM", "BYE"):
+             last_pair = r1_pairs.pop()
+             already_bye.add(last_pair[0].player)
+             final_pairs.append(last_pair)
+             need_byes -= 1
+        
+        # Put all remaining players into a bag for the additional BYE pairing
+        players_paired = [p for pair in r1_pairs for p in pair]
+        all_players = [e for e in players_paired if e.player != "SYSTEM"]
+        
+        # Separate players/entries who need a BYE and those already paired
+        bye_cands = [e for e in all_players if e.player not in already_bye]
+        random.shuffle(bye_cands) # Shuffle to re-randomize who gets the BYE
+        
+        # Add the required number of additional BYEs
+        while need_byes > 0 and bye_cands:
+            bye_entry = bye_cands.pop(0)
+            final_pairs.append((bye_entry, Entry("SYSTEM", "BYE")))
+            already_bye.add(bye_entry.player)
+            need_byes -= 1
+            
+        # Put the rest back into the final_pairs list
+        remaining_pairs = [pair for pair in r1_pairs if pair[0].player not in already_bye and pair[1].player not in already_bye]
+        
+        # Reconstruct the final list (BYE matches first, then regular matches)
+        r1_pairs = [p for p in final_pairs if p[1].character.upper() == "BYE"]
+        r1_pairs.extend([p for p in remaining_pairs if p[1].character.upper() != "BYE"])
+
+    # If all players got a bye due to high player count, simply return the pairs
+    if not r1_pairs:
+         # Fallback to the balanced generator if constrained failed completely
+         return generate_bracket_balanced(entries) 
+
+    # We must also ensure the pairings that were NOT BYE matches are randomized 
+    # in their final order for the bracket display.
+    random.shuffle(r1_pairs)
+
+    return r1_pairs
 
 def generate_bracket_teams(entries: List[Entry], team_of: Dict[str, str]) -> List[Tuple[Entry, Entry]]:
     # Same as regular but forbids same-team R1
