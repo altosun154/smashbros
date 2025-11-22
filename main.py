@@ -11,7 +11,7 @@ st.markdown("""
 <style>
 /* CSS for Match Boxes and Bracket */
 .match-box { border: 1px solid #ddd; border-radius: 10px; padding: 6px 8px; margin: 6px 0;
-  font-size: 14px; line-height: 1.25; background: #fff; }
+  font-size: 14px; line-height: 1.25; background: #fff; }
 .round-title { font-weight: 700; margin-bottom: 8px; }
 .name-line { display: flex; align-items: center; gap: 6px; }
 .name-line img { vertical-align: middle; }
@@ -21,93 +21,95 @@ st.markdown("""
 
 /* CSS for Round Robin Leaderboard */
 .leaderboard-container {
-    padding: 10px;
-    border-radius: 10px;
-    background-color: #f0f2f6;
-    margin-top: 20px;
+    padding: 10px;
+    border-radius: 10px;
+    background-color: #f0f2f6;
+    margin-top: 20px;
 }
 </style>
 """, unsafe_allow_html=True)
 
 # ---------------------------- GLOBAL STATE & NAVIGATION SETUP ----------------------------
 if "page" not in st.session_state:
-        st.session_state.page = "Bracket Generator"
-        
+    st.session_state.page = "Bracket Generator"
+
 if "player_colors" not in st.session_state:
-        st.session_state.player_colors = {}
-        
+    st.session_state.player_colors = {}
+
 if "rr_results" not in st.session_state:
-        st.session_state.rr_results = {}
-        
+    st.session_state.rr_results = {}
+
 if "rr_records" not in st.session_state:
-        st.session_state.rr_records = {}
-        
+    st.session_state.rr_records = {}
+
 # Primary list of players (default value)
 if "players_multiline" not in st.session_state:
-        st.session_state.players_multiline = "You\nFriend1\nFriend2"
+    st.session_state.players_multiline = "You\nFriend1\nFriend2"
+
 
 # ---------------------------- Data types ----------------------------
 @dataclass(frozen=True)
 class Entry:
-    player: str
-    character: str
+    player: str
+    character: str
 
 # ---------------------------- Power-of-two helpers ----------------------------
 def next_power_of_two(n: int) -> int:
-    if n <= 1:
-        return 1
-    return 1 << (n - 1).bit_length()
+    if n <= 1:
+        return 1
+    return 1 << (n - 1).bit_length()
 
 def byes_needed(n: int) -> int:
-    return max(0, next_power_of_two(n) - n)
+    return max(0, next_power_of_two(n) - n)
 
 # ---------------------------- Icons & colors ----------------------------
 ICON_DIR = os.path.join(os.path.dirname(__file__), "images")
 
 def get_character_icon_path(char_name: str) -> Optional[str]:
-    if not char_name:
-        return None
-    fname = f"{char_name.title().replace(' ', '_')}.png"
-    path = os.path.join(ICON_DIR, fname)
-    return path if os.path.exists(path) else None
+    if not char_name:
+        return None
+    fname = f"{char_name.title().replace(' ', '_')}.png"
+    path = os.path.join(ICON_DIR, fname)
+    return path if os.path.exists(path) else None
 
 TEAM_COLOR_FALLBACKS = [
-    "#E91E63", "#3F51B5", "#009688", "#FF9800", "#9C27B0",
-    "#4CAF50", "#2196F3", "#FF5722", "#795548", "#607D8B"
+    "#E91E63", "#3F51B5", "#009688", "#FF9800", "#9C27B0",
+    "#4CAF50", "#2196F3", "#FF5722", "#795548", "#607D8B"
 ]
 PLAYER_FALLBACKS = [
-    "#FF6F61", "#6B5B95", "#88B04B", "#F7CAC9", "#92A8D1",
-    "#955251", "#B565A7", "#009B77", "#DD4124", "#45B8AC"
+    "#FF6F61", "#6B5B95", "#88B04B", "#F7CAC9", "#92A8D1",
+    "#955251", "#B565A7", "#009B77", "#DD4124", "#45B8AC"
 ]
 
 def render_name_html(player: str, team_of: Dict[str, str], team_colors: Dict[str, str], player_colors: Dict[str, str]) -> str:
-    t = team_of.get(player, "")
-    if t and team_colors.get(t):
-        color = team_colors[t]
-    else:
-        # MODIFIED: Use and update persistent session state color for individual player coloring
-        # Ensure the fallback selection is based on the current size of the *persistent* color dictionary
-        color = st.session_state.player_colors.setdefault(player, PLAYER_FALLBACKS[len(st.session_state.player_colors) % len(PLAYER_FALLBACKS)])
-    safe_player = player.replace("<", "&lt;").replace(">", "&gt;")
-    return f"<span style='color:{color};font-weight:600'>{safe_player}</span>"
+    t = team_of.get(player, "")
+    if t and team_colors.get(t):
+        color = team_colors[t]
+    else:
+        color = st.session_state.player_colors.setdefault(
+            player,
+            PLAYER_FALLBACKS[len(st.session_state.player_colors) % len(PLAYER_FALLBACKS)]
+        )
+    safe_player = player.replace("<", "&lt;").replace(">", "&gt;")
+    return f"<span style='color:{color};font-weight:600'>{safe_player}</span>"
 
 def render_entry_line(e: Optional[Entry], team_of: Dict[str, str], team_colors: Dict[str, str], player_colors: Dict[str, str]) -> str:
-    if e is None:
-        return "<div class='name-line tbd'>TBD</div>"
-    if e.character.upper() == "BYE":
-        return "<div class='name-line tbd'>BYE</div>"
-    icon = get_character_icon_path(e.character)
-    # MODIFIED: Pass the session state player_colors dictionary for consistent color lookup
-    name_html = render_name_html(e.player, team_of, team_colors, st.session_state.player_colors)
-    char_safe = e.character.replace("<", "&lt;").replace(">", "&gt;")
-    if icon:
-        return f"<div class='name-line'><img src='file://{icon}' width='24'/> <b>{char_safe}</b> ({name_html})</div>"
-    else:
-        return f"<div class='name-line'><b>{char_safe}</b> ({name_html})</div>"
+    if e is None:
+        return "<div class='name-line tbd'>TBD</div>"
+    if e.character.upper() == "BYE":
+        return "<div class='name-line tbd'>BYE</div>"
+    icon = get_character_icon_path(e.character)
+    name_html = render_name_html(e.player, team_of, team_colors, st.session_state.player_colors)
+    char_safe = e.character.replace("<", "&lt;").replace(">", "&gt;")
+    if icon:
+        return f"<div class='name-line'><img src='file://{icon}' width='24'/> <b>{char_safe}</b> ({name_html})</div>"
+    else:
+        return f"<div class='name-line'><b>{char_safe}</b> ({name_html})</div>"
 
 def entry_to_label(e: Optional[Entry]) -> str:
-    if e is None: return ""
-    return f"{e.player} — {e.character}"
+    if e is None:
+        return ""
+    return f"{e.player} — {e.character}"
 
 # ---------------------------- Bracket Generator Functions ----------------------------
 def pick_from_lowest_tally(cands: List[Entry], tally: Dict[str, int], exclude_player: Optional[str] = None) -> Optional[Entry]:
