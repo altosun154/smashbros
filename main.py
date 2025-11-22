@@ -252,7 +252,7 @@ def generate_bracket_balanced(
 # NOTE: The generate_bracket_balanced and generate_bracket_teams functions remain UNCHANGED
 # because they are used by the 'teams' mode.
 
-def generate_bracket_regular(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
+def generate_bracket_regular(entries: List[Entry], max_repeats: int) -> List[Tuple[Entry, Entry]]:
     """
     Regular mode uses the constrained pairing logic (max_repeats=2) 
     and then ensures the initial pairing includes BYEs to pad to the next power of two.
@@ -262,7 +262,7 @@ def generate_bracket_regular(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
     
     # Run the core logic to get initial pairings with minimal repeats (up to 2)
     # The core logic handles a single BYE if necessary for an odd number.
-    r1_pairs = generate_bracket_constrained_core(base_entries, max_repeats=2)
+    r1_pairs = generate_bracket_constrained_core(base_entries, max_repeats=max_repeats)
     
     # ------------------------------------------------------------------
     # Now, add additional BYEs to reach the next power of two
@@ -502,17 +502,31 @@ with st.sidebar:
     default_players = st.session_state.players_multiline # Use the persistent value
 
     if st.session_state.page == "Bracket Generator":
-        st.header("Rule Set")
-        rule = st.selectbox(
-            "Choose mode",
-            options=["regular", "teams"],
-            index=0,
-            key="rule_select", # Added key for state management
-            help=(
-                "regular: balanced random (no self-matches), fills BYEs to next power of 2.\n"
-                "teams: regular + forbids same-team matches in round 1 (names colored by team)."
+        st.header("Rule Set")
+        rule = st.selectbox(
+            "Choose mode",
+            options=["regular", "teams"],
+            index=0,
+            key="rule_select", # Added key for state management
+            help=(
+                "regular: attempts to limit player repeats, fills BYEs to next power of 2.\n"
+                "teams: regular + forbids same-team matches in round 1 (names colored by team)."))
+
+        # --- NEW INPUT FOR R1 CONSTRAINT ---
+        # Initialize max_repeats
+        max_repeats = 2 
+        
+        if rule == "regular":
+             max_repeats = st.number_input(
+                "Max times any two players can match (R1)", 
+                min_value=1, max_value=10, value=2, step=1, 
+                key="max_repeats_regular_input",
+                help="The algorithm attempts to swap players to keep R1 pairings below this limit. Set to 1 for maximum variation."
             )
-        )
+        # --- END NEW INPUT ---
+        
+        st.divider()
+        st.header("Players")
 
         st.divider()
         st.header("Players")
