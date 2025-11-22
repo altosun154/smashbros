@@ -1,4 +1,4 @@
-import streamlit as st
+this is the latest:import streamlit as st
 import random
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict
@@ -110,7 +110,7 @@ def entry_to_label(e: Optional[Entry]) -> str:
     if e is None: return ""
     return f"{e.player} — {e.character}"
 
-# ---------------------------- Bracket Generator Functions ----------------------------
+# ---------------------------- Balanced generator (Regular core) ----------------------------
 def pick_from_lowest_tally(cands: List[Entry], tally: Dict[str, int], exclude_player: Optional[str] = None) -> Optional[Entry]:
     pool = [e for e in cands if e.player != exclude_player]
     if not pool:
@@ -119,67 +119,6 @@ def pick_from_lowest_tally(cands: List[Entry], tally: Dict[str, int], exclude_pl
     lowest = [e for e in pool if tally.get(e.player, 0) == m]
     return random.choice(lowest)
 
-def generate_bracket_constrained_core(
-    entries: List[Entry], 
-    max_repeats: int = 2
-) -> List[Tuple[Entry, Entry]]:
-    """
-    Core function to generate pairings while attempting to limit 
-    the number of times any two players match (based on player names). 
-    It pairs sequentially and adds a single BYE if needed, but does NOT pad to power of two.
-    """
-    # Filter out entries that are already BYE (though they shouldn't be here)
-    base_entries = [e for e in entries if e.character.upper() != "BYE"]
-    
-    # 1. Create a working list and shuffle
-    bag = base_entries.copy()
-    random.shuffle(bag)
-
-    match_counts: Dict[Tuple[str, str], int] = {}  # Tracks matchups between player NAMES
-    bracket: List[Tuple[Entry, Entry]] = []
-
-    def key(a: str, b: str) -> Tuple[str, str]:
-        # Always sort the player names to ensure consistency
-        return tuple(sorted([a, b]))
-
-    def has_played_too_much(p1_name: str, p2_name: str) -> bool:
-        return match_counts.get(key(p1_name, p2_name), 0) >= max_repeats
-
-    def record(p1_name: str, p2_name: str):
-        k = key(p1_name, p2_name)
-        match_counts[k] = match_counts.get(k, 0) + 1
-
-    i = 0
-    while i < len(bag) - 1:
-        e1 = bag[i]
-        e2 = bag[i + 1]
-        
-        # If these two players have matched too many times, try swapping
-        if has_played_too_much(e1.player, e2.player):
-            
-            # Find a valid swap partner for the second entry (e2)
-            for j in range(i + 2, len(bag)):
-                e_swap = bag[j]
-                
-                # Check if e1 vs e_swap is OK
-                if not has_played_too_much(e1.player, e_swap.player):
-                    # Perform the swap
-                    bag[i + 1], bag[j] = bag[j], bag[i + 1]
-                    e2 = bag[i + 1]  # Update e2 to the new partner
-                    break
-            
-        # Add the final pairing
-        bracket.append((e1, e2))
-        record(e1.player, e2.player)
-        i += 2
-
-    # Handle odd leftover entry by assigning a single BYE
-    if len(bag) % 2 != 0:
-        last_entry = bag[-1]
-        bracket.append((last_entry, Entry("SYSTEM", "BYE")))
-        
-    return bracket
-
 def generate_bracket_balanced(
     entries: List[Entry],
     *,
@@ -187,7 +126,7 @@ def generate_bracket_balanced(
     team_of: Optional[Dict[str, str]] = None
 ) -> List[Tuple[Entry, Entry]]:
     """
-    Balanced-random pairing (Used by Teams mode):
+    Balanced-random pairing:
       - no self-match,
       - optional: forbid same-team,
       - fills BYEs to next power of two,
@@ -246,66 +185,15 @@ def generate_bracket_balanced(
         pairs.append((bag[0], Entry("SYSTEM", "BYE")))
     return pairs
 
-def generate_bracket_regular(entries: List[Entry], max_repeats: int) -> List[Tuple[Entry, Entry]]:
-    """
-    Regular mode uses the constrained pairing logic (user-defined max_repeats) 
-    and then ensures the initial pairing includes BYEs to pad to the next power of two.
-    """
-    base_entries = [e for e in entries if e.player != "SYSTEM"]
-    initial_players_count = len(base_entries)
-    need_total_byes = byes_needed(initial_players_count)
-    
-    # 1. Run the core constrained logic to get initial sequential pairings
-    r1_pairs_raw = generate_bracket_constrained_core(base_entries, max_repeats=max_repeats)
-    
-    # 2. Determine which players already got a BYE from the core logic (if odd players)
-    already_bye_players = set()
-    final_pairs = []
-
-    # If the last pair is a BYE (from the odd number handling), extract it and count it
-    if r1_pairs_raw and r1_pairs_raw[-1][1] == Entry("SYSTEM", "BYE"):
-        last_bye_pair = r1_pairs_raw.pop()
-        already_bye_players.add(last_bye_pair[0].player)
-        final_pairs.append(last_bye_pair)
-        need_total_byes -= 1
-    
-    # All non-BYE pairs from the constrained core
-    non_bye_pairs = [p for p in r1_pairs_raw if p[1].character.upper() != "BYE"]
-    
-    # Get all entries that still need a BYE to reach the power of two total
-    all_players = [e for e in base_entries]
-    
-    # Identify players already fully paired (in non-BYE matches)
-    players_in_non_bye_pairs = {e.player for pair in non_bye_pairs for e in pair}
-    
-    # Candidates for the remaining BYEs (those not already in a BYE or a non-BYE match)
-    bye_cands = [
-        e for e in all_players 
-        if e.player not in already_bye_players and e.player not in players_in_non_bye_pairs
-    ]
-
-    random.shuffle(bye_cands) # Randomize who gets the remaining BYEs
-    
-    # 3. Add the required number of additional BYEs
-    while need_total_byes > 0 and bye_cands:
-        bye_entry = bye_cands.pop(0)
-        final_pairs.append((bye_entry, Entry("SYSTEM", "BYE")))
-        need_total_byes -= 1
-        
-    # 4. Reconstruct the final R1 pairings: BYE matches first, then non-BYE matches
-    r1_pairs = [p for p in final_pairs if p[1].character.upper() == "BYE"]
-    r1_pairs.extend(non_bye_pairs)
-    
-    # Final shuffle to randomize the order of the actual matches
-    random.shuffle(r1_pairs)
-
-    return r1_pairs
+def generate_bracket_regular(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
+    # Regular is the balanced generator (what "everything/groups" did)
+    return generate_bracket_balanced(entries)
 
 def generate_bracket_teams(entries: List[Entry], team_of: Dict[str, str]) -> List[Tuple[Entry, Entry]]:
     # Same as regular but forbids same-team R1
     return generate_bracket_balanced(entries, forbid_same_team=True, team_of=team_of)
 
-# ---------------------------- ROUND ROBIN LOGIC ----------------------------
+# ---------------------------- ROUND ROBIN LOGIC (NEW) ----------------------------
 
 def generate_round_robin_schedule(players: List[str]) -> List[Tuple[str, str]]:
     """Generates a list of all unique match-ups (Player A vs Player B)."""
@@ -466,7 +354,7 @@ def show_round_robin_page(players: List[str]):
         st.session_state.pop("rr_schedule", None)
         st.rerun()
 
-# ---------------------------- Sidebar ----------------------------
+# ---------------------------- Sidebar (MODIFIED) ----------------------------
 with st.sidebar:
     st.header("App Navigation")
     # NEW: Control which page is shown
@@ -492,25 +380,11 @@ with st.sidebar:
             index=0,
             key="rule_select", # Added key for state management
             help=(
-                "regular: attempts to limit player repeats, fills BYEs to next power of 2.\n"
+                "regular: balanced random (no self-matches), fills BYEs to next power of 2.\n"
                 "teams: regular + forbids same-team matches in round 1 (names colored by team)."
             )
         )
 
-        # --- NEW INPUT FOR R1 CONSTRAINT ---
-        # Initialize max_repeats for the Bracket Generator scope
-        max_repeats = 2 
-        
-        if rule == "regular":
-            max_repeats = st.number_input(
-                "Max times any two players can match (R1)", 
-                min_value=1, max_value=10, value=2, step=1, 
-                key="max_repeats_regular_input",
-                help="The algorithm attempts to swap players to keep R1 pairings below this limit. Set to 1 for maximum variation."
-            )
-            
-        # --- END NEW INPUT ---
-        
         st.divider()
         st.header("Players")
         # Use primary key 'players_multiline'
@@ -579,13 +453,12 @@ with st.sidebar:
         
         # Initialize default values needed by the Bracket logic if it runs next
         rule, team_of, team_colors, chars_per_person, build_clicked, shuffle_within_player, auto_fill_clicked, clean_rows = "regular", {}, {}, 1, False, True, False, True
-        max_repeats = 2 # Added default for when not in Bracket Generator view
         
     # Final list used by main script body
     st.session_state.players_list = players
 
 
-# ---------------------------- MAIN CONTENT FLOW ----------------------------
+# ---------------------------- MAIN CONTENT FLOW (MODIFIED) ----------------------------
 # The title is now conditional based on the selected page (moved outside of the sidebar)
 if st.session_state.page == "Bracket Generator":
     st.title("🎮 Smash Bracket — Regular & Teams")
@@ -674,7 +547,7 @@ else: # Bracket Generator Content
     entries = df_to_entries(table_df, clean_rows_flag=clean_rows)
 
     # ---------------------------- Rounds building & rendering ----------------------------
-    def compute_rounds_pairs(r1_pairs: List[Tuple[Optional[Entry], Optional[Entry]]], winners_map: Dict[int, str]) -> List[List[Tuple[Optional[Entry], Optional[Entry]]]]:
+    def compute_rounds_pairs(r1_pairs: List[Tuple[Entry, Entry]], winners_map: Dict[int, str]) -> List[List[Tuple[Optional[Entry], Optional[Entry]]]]:
         rounds: List[List[Tuple[Optional[Entry], Optional[Entry]]]] = []
         rounds.append([(a, b) for (a, b) in r1_pairs])
 
@@ -713,7 +586,7 @@ else: # Bracket Generator Content
     def render_bracket_grid(all_rounds: List[List[Tuple[Optional[Entry], Optional[Entry]]]], team_of: Dict[str, str], team_colors: Dict[str, str]):
         cols = st.columns(len(all_rounds))
         if team_colors:
-            legend = "  ".join([f"<span class='legend-badge' style='background:{c}'></span>{t}" for t, c in team_colors.items()])
+            legend = "  ".join([f"<span class='legend-badge' style='background:{c}'></span>{t}" for t, c in team_colors.items()])
             st.markdown(f"<div class='small'><b>Legend:</b> {legend}</div>", unsafe_allow_html=True)
 
         for round_idx, round_pairs in enumerate(all_rounds):
@@ -744,7 +617,6 @@ else: # Bracket Generator Content
                 index=idx,
                 key=f"winner_{i}",
                 horizontal=True,
-                label_visibility="collapsed"
             )
             st.session_state.r1_winners[i] = choice if choice != "(undecided)" else ""
 
@@ -758,7 +630,7 @@ else: # Bracket Generator Content
                 st.error("Add at least 2 entries (characters).")
             else:
                 if rule == "regular":
-                    bracket = generate_bracket_regular(entries, max_repeats=max_repeats)
+                    bracket = generate_bracket_regular(entries)
                 # Corrected: Use '#' for Python comments
                 else:  # teams
                     bracket = generate_bracket_teams(entries, team_of)
