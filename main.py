@@ -32,20 +32,19 @@ st.markdown("""
 # ---------------------------- GLOBAL STATE & NAVIGATION SETUP ----------------------------
 if "page" not in st.session_state:
         st.session_state.page = "Bracket Generator"
-    
+        
 if "player_colors" not in st.session_state:
         st.session_state.player_colors = {}
-    
+        
 if "rr_results" not in st.session_state:
         st.session_state.rr_results = {}
-    
+        
 if "rr_records" not in st.session_state:
         st.session_state.rr_records = {}
-    
+        
 # Primary list of players (default value)
 if "players_multiline" not in st.session_state:
         st.session_state.players_multiline = "You\nFriend1\nFriend2"
-
 
 # ---------------------------- Data types ----------------------------
 @dataclass(frozen=True)
