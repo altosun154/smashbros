@@ -1,7 +1,7 @@
 import streamlit as st
 import random
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Set
 import pandas as pd
 import math
 import os
@@ -29,23 +29,27 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------------------- GLOBAL STATE & NAVIGATION SETUP ----------------------------
+# ---------------------------- GLOBAL STATE ----------------------------
 if "page" not in st.session_state:
     st.session_state.page = "Bracket Generator"
-    
+
 if "player_colors" not in st.session_state:
     st.session_state.player_colors = {}
-    
+
 if "rr_results" not in st.session_state:
     st.session_state.rr_results = {}
-    
+
 if "rr_records" not in st.session_state:
     st.session_state.rr_records = {}
-    
-# Primary list of players (default value)
+
 if "players_multiline" not in st.session_state:
     st.session_state.players_multiline = "You\nFriend1\nFriend2"
 
+# NEW: player ordering state for hierarchical system
+if "player_order_drawn" not in st.session_state:
+    st.session_state.player_order_drawn = []
+if "player_order_final" not in st.session_state:
+    st.session_state.player_order_final = []
 
 # ---------------------------- Data types ----------------------------
 @dataclass(frozen=True)
@@ -81,138 +85,264 @@ PLAYER_FALLBACKS = [
     "#955251", "#B565A7", "#009B77", "#DD4124", "#45B8AC"
 ]
 
-def render_name_html(player: str, team_of: Dict[str, str], team_colors: Dict[str, str], player_colors: Dict[str, str]) -> str:
+def render_name_html(player: str, team_of: Dict[str, str], team_colors: Dict[str, str]) -> str:
     t = team_of.get(player, "")
     if t and team_colors.get(t):
         color = team_colors[t]
     else:
-        # MODIFIED: Use and update persistent session state color for individual player coloring
-        # Ensure the fallback selection is based on the current size of the *persistent* color dictionary
-        color = st.session_state.player_colors.setdefault(player, PLAYER_FALLBACKS[len(st.session_state.player_colors) % len(PLAYER_FALLBACKS)])
+        color = st.session_state.player_colors.setdefault(
+            player,
+            PLAYER_FALLBACKS[len(st.session_state.player_colors) % len(PLAYER_FALLBACKS)]
+        )
     safe_player = player.replace("<", "&lt;").replace(">", "&gt;")
     return f"<span style='color:{color};font-weight:600'>{safe_player}</span>"
 
-def render_entry_line(e: Optional[Entry], team_of: Dict[str, str], team_colors: Dict[str, str], player_colors: Dict[str, str]) -> str:
+def render_entry_line(e: Optional[Entry], team_of: Dict[str, str], team_colors: Dict[str, str]) -> str:
     if e is None:
         return "<div class='name-line tbd'>TBD</div>"
     if e.character.upper() == "BYE":
         return "<div class='name-line tbd'>BYE</div>"
     icon = get_character_icon_path(e.character)
-    # MODIFIED: Pass the session state player_colors dictionary for consistent color lookup
-    name_html = render_name_html(e.player, team_of, team_colors, st.session_state.player_colors)
+    name_html = render_name_html(e.player, team_of, team_colors)
     char_safe = e.character.replace("<", "&lt;").replace(">", "&gt;")
     if icon:
         return f"<div class='name-line'><img src='file://{icon}' width='24'/> <b>{char_safe}</b> ({name_html})</div>"
-    else:
-        return f"<div class='name-line'><b>{char_safe}</b> ({name_html})</div>"
+    return f"<div class='name-line'><b>{char_safe}</b> ({name_html})</div>"
 
 def entry_to_label(e: Optional[Entry]) -> str:
-    if e is None: return ""
+    if e is None:
+        return ""
     return f"{e.player} — {e.character}"
 
-# ---------------------------- Balanced generator (Regular core) ----------------------------
-def pick_from_lowest_tally(cands: List[Entry], tally: Dict[str, int], exclude_player: Optional[str] = None) -> Optional[Entry]:
-    pool = [e for e in cands if e.player != exclude_player]
-    if not pool:
-        return None
-    m = min(tally.get(e.player, 0) for e in pool)
-    lowest = [e for e in pool if tally.get(e.player, 0) == m]
-    return random.choice(lowest)
+# ---------------------------- Hierarchical Weighted Tournament System ----------------------------
+def split_half(seq: List) -> Tuple[List, List]:
+    """
+    Split into top half and bottom half.
+    If odd, top half gets the extra element.
+    """
+    mid = (len(seq) + 1) // 2
+    return seq[:mid], seq[mid:]
 
-def generate_bracket_balanced(
+def build_player_character_map(entries: List[Entry], df: pd.DataFrame) -> Dict[str, List[str]]:
+    """
+    Character ordering = the order in the table editor (df row order).
+    If df not usable, fallback to entries insertion order.
+    """
+    order_map: Dict[str, List[str]] = {}
+    if df is not None and "Player" in df.columns and "Character" in df.columns:
+        for _, row in df.iterrows():
+            p = str(row.get("Player", "")).strip()
+            c = str(row.get("Character", "")).strip()
+            if not p or not c:
+                continue
+            order_map.setdefault(p, []).append(c)
+    else:
+        for e in entries:
+            order_map.setdefault(e.player, []).append(e.character)
+    # remove dupes while preserving order (in case user repeats)
+    for p, chars in order_map.items():
+        seen = set()
+        deduped = []
+        for c in chars:
+            if c in seen:
+                continue
+            seen.add(c)
+            deduped.append(c)
+        order_map[p] = deduped
+    return order_map
+
+def categorize_entries_ABC(
+    entries: List[Entry],
+    player_order_final: List[str],
+    df_table: pd.DataFrame
+) -> Dict[Entry, str]:
+    """
+    Phase 2:
+      - split players into top half / bottom half based on final order
+      - split each player's characters into top half / bottom half
+      - Category A: top chars of top-half players
+      - Category B: bottom chars of top-half players + top chars of bottom-half players
+      - Category C: bottom chars of bottom-half players
+    """
+    player_chars = build_player_character_map(entries, df_table)
+
+    # keep only players that actually exist in entries
+    present_players = [p for p in player_order_final if p in player_chars]
+    if not present_players:
+        present_players = sorted(player_chars.keys())
+
+    top_players, bottom_players = split_half(present_players)
+    top_set = set(top_players)
+    bottom_set = set(bottom_players)
+
+    cat: Dict[Entry, str] = {}
+    for e in entries:
+        chars = player_chars.get(e.player, [])
+        top_chars, bottom_chars = split_half(chars)
+        if e.player in top_set:
+            if e.character in top_chars:
+                cat[e] = "A"
+            else:
+                cat[e] = "B"
+        elif e.player in bottom_set:
+            if e.character in top_chars:
+                cat[e] = "B"
+            else:
+                cat[e] = "C"
+        else:
+            # if player wasn't in the ordering for some reason, treat as bottom group
+            if e.character in top_chars:
+                cat[e] = "B"
+            else:
+                cat[e] = "C"
+    return cat
+
+def weighted_pick(
+    candidates: List[Entry],
+    weights: List[float]
+) -> Optional[Entry]:
+    if not candidates:
+        return None
+    return random.choices(candidates, weights=weights, k=1)[0]
+
+def generate_bracket_hierarchical_weighted(
     entries: List[Entry],
     *,
-    forbid_same_team: bool = False,
-    team_of: Optional[Dict[str, str]] = None
+    team_mode: bool = False,
+    team_of: Optional[Dict[str, str]] = None,
+    df_table: Optional[pd.DataFrame] = None,
+    player_order_final: Optional[List[str]] = None
 ) -> List[Tuple[Entry, Entry]]:
     """
-    Balanced-random pairing:
-      - no self-match,
-      - optional: forbid same-team,
-      - fills BYEs to next power of two,
-      - uses per-player tallies for fairness.
+    Implements the user's Project Spec:
+      Phase 1: player order provided via UI (already random + optional manual override)
+      Phase 2: auto categorize entries into A/B/C
+      Phase 3: pairing with:
+        - first pick: pure random from remaining pool
+        - second pick: weighted 40/20/20 by category relative to first pick
+      Phase 4: remove both entries immediately, repeat until bracket filled
+    Constraints kept:
+      - no self-match (same player vs same player)
+      - teams mode: forbid same-team matchups in round 1
+      - BYEs fill to next power of two; BYE always paired with a real entry (no BYE vs BYE)
     """
     team_of = team_of or {}
-    base = [e for e in entries if e.player != "SYSTEM"]
-    need = byes_needed(len(base))
+    base = [e for e in entries if e.player != "SYSTEM" and e.character.strip()]
+    if len(base) < 2:
+        return []
 
-    bag = base.copy()
-    random.shuffle(bag)
-    tally: Dict[str, int] = {}
+    # BYE handling
+    need_byes = byes_needed(len(base))
+    remaining: List[Entry] = base.copy()
+    random.shuffle(remaining)
+
     pairs: List[Tuple[Entry, Entry]] = []
 
-    # Use some BYEs first if needed
-    while need > 0 and bag:
-        a = pick_from_lowest_tally(bag, tally)
-        bag.remove(a)
-        pairs.append((a, Entry("SYSTEM", "BYE")))
-        tally[a.player] = tally.get(a.player, 0) + 1
-        need -= 1
+    # Phase 2 categories for real entries (BYEs not categorized)
+    final_order = player_order_final or sorted({e.player for e in base})
+    cat_map = categorize_entries_ABC(base, final_order, df_table if df_table is not None else pd.DataFrame())
 
-    def pick_opponent(a: Entry, pool: List[Entry]) -> Optional[Entry]:
-        pool2 = [x for x in pool if x.player != a.player]
-        if forbid_same_team:
+    # Pre-assign BYEs: pair BYE with random real entries
+    bye_entry = Entry("SYSTEM", "BYE")
+    while need_byes > 0 and remaining:
+        a = remaining.pop()  # random-ish because list was shuffled
+        pairs.append((a, bye_entry))
+        need_byes -= 1
+
+    # Now do the weighted pairing among remaining real entries
+    def allowed(a: Entry, b: Entry) -> bool:
+        if a.player == b.player:
+            return False
+        if team_mode:
             ta = team_of.get(a.player, "")
-            if ta:
-                pool2 = [x for x in pool2 if team_of.get(x.player, "") != ta]
-        if not pool2:
-            return None
-        m = min(tally.get(x.player, 0) for x in pool2)
-        lowest = [x for x in pool2 if tally.get(x.player, 0) == m]
-        return random.choice(lowest)
+            tb = team_of.get(b.player, "")
+            if ta and tb and ta == tb:
+                return False
+        return True
 
-    while len(bag) >= 2:
-        a = pick_from_lowest_tally(bag, tally)
-        bag.remove(a)
-        b = pick_opponent(a, bag)
-        if b is None:
-            # try turn this into a BYE if adding one still gets us to power-of-two
-            if byes_needed(len(bag)+1) > 0:
-                pairs.append((a, Entry("SYSTEM", "BYE")))
-                tally[a.player] += 1 if a.player in tally else 1
-            else:
-                bag.append(a)
-                random.shuffle(bag)
-                if len(bag) == 1:
+    # weights: same=0.4, other two cats=0.2 each (re-normalized over available candidates)
+    while len(remaining) >= 2:
+        first = random.choice(remaining)  # Phase 3: First Pick is pure random
+        remaining.remove(first)
+
+        first_cat = cat_map.get(first, "B")
+
+        candidates = [x for x in remaining if allowed(first, x)]
+        if not candidates:
+            # Can't find an opponent under constraints: put first back and reshuffle,
+            # and if it still can't work, break out.
+            remaining.append(first)
+            random.shuffle(remaining)
+            # try a different first next loop; but if stuck, we eventually stop
+            stuck_check = 0
+            for _ in range(8):
+                test_first = random.choice(remaining)
+                test_candidates = [x for x in remaining if x != test_first and allowed(test_first, x)]
+                if test_candidates:
+                    stuck_check = 1
                     break
+            if not stuck_check:
+                break
             continue
-        bag.remove(b)
-        pairs.append((a, b))
-        tally[a.player] = tally.get(a.player, 0) + 1
-        tally[b.player] = tally.get(b.player, 0) + 1
 
-    if bag:  # odd leftover
-        pairs.append((bag[0], Entry("SYSTEM", "BYE")))
+        weights = []
+        for c in candidates:
+            c_cat = cat_map.get(c, "B")
+            if c_cat == first_cat:
+                weights.append(0.4)
+            else:
+                weights.append(0.2)
+
+        second = weighted_pick(candidates, weights)
+        if second is None:
+            remaining.append(first)
+            random.shuffle(remaining)
+            continue
+
+        # Phase 4: removal (permanent for this bracket generation)
+        remaining.remove(second)
+        pairs.append((first, second))
+
+    # If odd leftover (can happen if constraints block matching), give it a BYE if that still makes sense
+    if remaining:
+        pairs.append((remaining[0], bye_entry))
+
+    # Ensure bracket size matches power-of-two target (pairs count = target/2)
+    # If we ended early due to constraints, we may be short. We'll just return what we have.
     return pairs
 
-def generate_bracket_regular(entries: List[Entry]) -> List[Tuple[Entry, Entry]]:
-    # Regular is the balanced generator (what "everything/groups" did)
-    return generate_bracket_balanced(entries)
+def generate_bracket_regular(entries: List[Entry], df_table: pd.DataFrame, player_order_final: List[str]) -> List[Tuple[Entry, Entry]]:
+    return generate_bracket_hierarchical_weighted(
+        entries,
+        team_mode=False,
+        team_of={},
+        df_table=df_table,
+        player_order_final=player_order_final
+    )
 
-def generate_bracket_teams(entries: List[Entry], team_of: Dict[str, str]) -> List[Tuple[Entry, Entry]]:
-    # Same as regular but forbids same-team R1
-    return generate_bracket_balanced(entries, forbid_same_team=True, team_of=team_of)
+def generate_bracket_teams(entries: List[Entry], team_of: Dict[str, str], df_table: pd.DataFrame, player_order_final: List[str]) -> List[Tuple[Entry, Entry]]:
+    return generate_bracket_hierarchical_weighted(
+        entries,
+        team_mode=True,
+        team_of=team_of,
+        df_table=df_table,
+        player_order_final=player_order_final
+    )
 
-# ---------------------------- ROUND ROBIN LOGIC (NEW) ----------------------------
-
+# ---------------------------- ROUND ROBIN ----------------------------
 def generate_round_robin_schedule(players: List[str]) -> List[Tuple[str, str]]:
-    """Generates a list of all unique match-ups (Player A vs Player B)."""
-    matches = []
     current_players = players.copy()
     if len(current_players) % 2 != 0:
         current_players = current_players + ['BYE']
-    
+
     n = len(current_players)
-    rounds = n - 1 
-    
-    # Check if schedule exists in state and is valid for current players
+    rounds = n - 1
+
     schedule_key = tuple(sorted(players))
     if "rr_schedule" not in st.session_state or st.session_state["rr_schedule"].get("players") != schedule_key:
-        
-        # Implementation of the circle method for scheduling
         matchups = []
         p = current_players.copy()
-        
+
         for _ in range(rounds):
             half = n // 2
             for i in range(half):
@@ -220,93 +350,67 @@ def generate_round_robin_schedule(players: List[str]) -> List[Tuple[str, str]]:
                 p2 = p[n - 1 - i]
                 if p1 != 'BYE' and p2 != 'BYE':
                     matchups.append((p1, p2))
-            # Rotate all players except the first
             p.insert(1, p.pop())
-            
-        # Store and initialize results/records
-        st.session_state["rr_schedule"] = {
-            "players": schedule_key,
-            "matches": matchups,
-        }
+
+        st.session_state["rr_schedule"] = {"players": schedule_key, "matches": matchups}
         st.session_state["rr_results"] = {}
         st.session_state["rr_records"] = {player: {"Wins": 0, "Losses": 0} for player in players if player != 'BYE'}
-        
+
     return st.session_state["rr_schedule"]["matches"]
 
 def update_round_robin_records():
-    """Recalculates records based on rr_results."""
-    # Ensure rr_records is initialized for all current players
-    # FIX: Use the primary players_multiline key as the source of truth
     players_in_state_raw = st.session_state.get("players_multiline", "").splitlines()
     players_in_state = [p.strip() for p in players_in_state_raw if p.strip() and p.strip() != 'BYE']
-    
+
     records = {player: {"Wins": 0, "Losses": 0} for player in players_in_state}
-    
+
     for match_id, winner in st.session_state.rr_results.items():
         if winner == "(Undecided)":
             continue
-            
-        # Match ID format: Player A|Player B
+
         p1, p2 = match_id.split('|')
-        
-        # Only process if both players are currently in the list (handles player removal)
         if p1 in players_in_state and p2 in players_in_state:
             loser = p2 if winner == p1 else p1
-            
             if winner in records:
                 records[winner]["Wins"] += 1
             if loser in records:
                 records[loser]["Losses"] += 1
-            
-    st.session_state.rr_records = records
 
+    st.session_state.rr_records = records
 
 def show_round_robin_page(players: List[str]):
     st.subheader("Round Robin Match Results Input")
-    
-    # Filter out BYE if present in the player list used for UI (shouldn't be, but safe check)
     clean_players = [p for p in players if p != 'BYE']
-    
+
     if len(clean_players) < 2:
         st.error("Please enter at least two players in the sidebar to generate a Round Robin tournament.")
         return
 
-    # 1. Generate/Get Schedule
     schedule = generate_round_robin_schedule(clean_players)
-
     st.info(f"Total Matches to Play: **{len(schedule)}**")
-    
-    # Recalculate records first
     update_round_robin_records()
-    
-    # Use st.columns(3) for match inputs
+
     cols = st.columns(3)
-    
+
     for i, (p1, p2) in enumerate(schedule, start=1):
         match_id = f"{p1}|{p2}"
-        
-        # Determine the color-coded labels for the title
-        # Ensure player colors are set if they haven't been in Bracket Generator mode yet
+
         p1_color = st.session_state.player_colors.setdefault(p1, PLAYER_FALLBACKS[len(st.session_state.player_colors) % len(PLAYER_FALLBACKS)])
         p2_color = st.session_state.player_colors.setdefault(p2, PLAYER_FALLBACKS[len(st.session_state.player_colors) % len(PLAYER_FALLBACKS)])
-        
+
         p1_html = f'<span style="color:{p1_color}; font-weight: bold;">{p1}</span>'
         p2_html = f'<span style="color:{p2_color}; font-weight: bold;">{p2}</span>'
-        
-        # Use existing winner or default to (Undecided)
+
         default_winner = st.session_state.rr_results.get(match_id, "(Undecided)")
         options = [p1, p2, "(Undecided)"]
-        
+
         try:
             default_index = options.index(default_winner)
         except ValueError:
             default_index = 2
 
         with cols[i % len(cols)]:
-            # Render the match title with colors (the fix for the HTML issue)
             st.markdown(f"**Match {i}:** {p1_html} vs {p2_html}", unsafe_allow_html=True)
-            
-            # Use plain names for the radio options
             winner = st.radio(
                 f"Winner (Match {i})",
                 options=options,
@@ -315,25 +419,24 @@ def show_round_robin_page(players: List[str]):
                 horizontal=True,
                 label_visibility="collapsed"
             )
-            
-            # Update results if a choice was made
             st.session_state.rr_results[match_id] = winner
-            
-    # 2. Leaderboard Display
+
     st.markdown("---")
     st.subheader("🏆 Tournament Leaderboard")
-    
+
     records_df = pd.DataFrame.from_dict(st.session_state.rr_records, orient='index')
-    
+
     if not records_df.empty:
         records_df.reset_index(names=['Player'], inplace=True)
-        
-        records_df["Win Rate"] = records_df.apply(lambda row: row['Wins'] / (row['Wins'] + row['Losses']) if (row['Wins'] + row['Losses']) > 0 else 0, axis=1)
+        records_df["Win Rate"] = records_df.apply(
+            lambda row: row['Wins'] / (row['Wins'] + row['Losses']) if (row['Wins'] + row['Losses']) > 0 else 0,
+            axis=1
+        )
         records_df.sort_values(by=['Wins', 'Losses', 'Player'], ascending=[False, True, True], inplace=True)
         records_df.index = records_df.index + 1
-        
+
         st.dataframe(
-            records_df, 
+            records_df,
             use_container_width=True,
             column_config={
                 "Player": st.column_config.Column("Player", width="small"),
@@ -344,33 +447,29 @@ def show_round_robin_page(players: List[str]):
         )
     else:
         st.info("No records to display. Please enter match results.")
-        
+
     st.markdown("---")
     if st.button("🔄 Reset All Round Robin Records"):
         st.session_state["rr_results"] = {}
-        # Re-initialize records based on current players
         current_players = [p.strip() for p in st.session_state.get("players_multiline", "").splitlines() if p.strip() != 'BYE']
         st.session_state["rr_records"] = {player: {"Wins": 0, "Losses": 0} for player in current_players}
         st.session_state.pop("rr_schedule", None)
         st.rerun()
 
-# ---------------------------- Sidebar (MODIFIED) ----------------------------
+# ---------------------------- Sidebar ----------------------------
 with st.sidebar:
     st.header("App Navigation")
-    # NEW: Control which page is shown
     selected_page = st.radio(
-        "Switch View", 
-        options=["Bracket Generator", "Round Robin"], 
-        index=["Bracket Generator", "Round Robin"].index(st.session_state.page), # Use current state to set index
-        key="page_radio" # Use a key for the radio button
+        "Switch View",
+        options=["Bracket Generator", "Round Robin"],
+        index=["Bracket Generator", "Round Robin"].index(st.session_state.page),
+        key="page_radio"
     )
-    # Immediately update session state page based on user interaction
     st.session_state.page = selected_page
-    
+
     st.divider()
-    
-    # --- Shared Player List Handling ---
-    default_players = st.session_state.players_multiline # Use the persistent value
+
+    default_players = st.session_state.players_multiline
 
     if st.session_state.page == "Bracket Generator":
         st.header("Rule Set")
@@ -378,24 +477,67 @@ with st.sidebar:
             "Choose mode",
             options=["regular", "teams"],
             index=0,
-            key="rule_select", # Added key for state management
+            key="rule_select",
             help=(
-                "regular: balanced random (no self-matches), fills BYEs to next power of 2.\n"
-                "teams: regular + forbids same-team matches in round 1 (names colored by team)."
+                "regular: hierarchical weighted system (A/B/C tiering + weighted pairing), fills BYEs to next power of 2.\n"
+                "teams: same logic, but forbids same-team matches in round 1."
             )
         )
 
         st.divider()
         st.header("Players")
-        # Use primary key 'players_multiline'
         players_multiline_input = st.text_area(
             "Enter player names (one per line)",
             value=default_players,
             height=140,
-            key="players_multiline", 
+            key="players_multiline",
             help="These names populate the Player dropdown."
         )
         players = [p.strip() for p in players_multiline_input.splitlines() if p.strip()]
+
+        # ---- Phase 1 UI: Initial Draw + Manual Override ----
+        st.divider()
+        st.header("Phase 1: Player Order")
+
+        # if players changed, reset ordering to avoid stale names
+        if set(st.session_state.player_order_drawn) != set(players):
+            st.session_state.player_order_drawn = []
+            st.session_state.player_order_final = []
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("🎲 Normal Start (Random Draw)", use_container_width=True):
+                order = players.copy()
+                random.shuffle(order)
+                st.session_state.player_order_drawn = order
+                st.session_state.player_order_final = order.copy()
+
+        with col_b:
+            if st.button("↩️ Use Drawn Order", use_container_width=True):
+                if st.session_state.player_order_drawn:
+                    st.session_state.player_order_final = st.session_state.player_order_drawn.copy()
+
+        drawn = st.session_state.player_order_drawn or players
+        final_default = st.session_state.player_order_final or drawn
+
+        st.caption("Manual Override: re-rank players (Rank 1 = strongest/top).")
+        # Manual ranking UI via unique selectboxes per rank
+        remaining_for_pick = final_default.copy()
+        new_final: List[str] = []
+        for i in range(len(players)):
+            default_choice = final_default[i] if i < len(final_default) else (remaining_for_pick[0] if remaining_for_pick else "")
+            options = [p for p in players if p not in new_final]
+            if default_choice not in options and options:
+                default_choice = options[0]
+            pick = st.selectbox(
+                f"Rank {i+1}",
+                options=options if options else [default_choice],
+                index=(options.index(default_choice) if default_choice in options else 0),
+                key=f"rank_pick_{i}"
+            )
+            new_final.append(pick)
+
+        st.session_state.player_order_final = new_final
 
         # Teams UI only in Teams mode
         team_of: Dict[str, str] = {}
@@ -406,7 +548,7 @@ with st.sidebar:
             team_names_input = st.text_input(
                 "Team labels (comma separated)",
                 value="Red, Blue",
-                key="team_names_input", # Added key for state management
+                key="team_names_input",
                 help="Example: Red, Blue, Green"
             )
             team_labels = [t.strip() for t in team_names_input.split(",") if t.strip()]
@@ -424,8 +566,7 @@ with st.sidebar:
             team_of = {p: (t if t != "(none)" else "") for p, t in team_of.items()}
 
             st.divider()
-        
-        # Bracket-specific controls
+
         st.header("Characters per player")
         chars_per_person = st.number_input("How many per player?", min_value=1, max_value=50, value=2, step=1, key="chars_per_person")
 
@@ -438,41 +579,33 @@ with st.sidebar:
         st.divider()
         st.header("General")
         clean_rows = st.checkbox("Remove empty rows", value=True)
-    
-    else: # st.session_state.page == "Round Robin"
+
+    else:
         st.header("Players")
-        # Use primary key 'players_multiline' here too. The state is synchronized across the two view inputs.
         players_multiline_input = st.text_area(
             "Enter player names (one per line)",
             value=default_players,
             height=140,
-            key="players_multiline", 
+            key="players_multiline",
             help="These names define the participants for Round Robin."
         )
         players = [p.strip() for p in players_multiline_input.splitlines() if p.strip()]
-        
-        # Initialize default values needed by the Bracket logic if it runs next
         rule, team_of, team_colors, chars_per_person, build_clicked, shuffle_within_player, auto_fill_clicked, clean_rows = "regular", {}, {}, 1, False, True, False, True
-        
-    # Final list used by main script body
+
     st.session_state.players_list = players
 
-
-# ---------------------------- MAIN CONTENT FLOW (MODIFIED) ----------------------------
-# The title is now conditional based on the selected page (moved outside of the sidebar)
+# ---------------------------- MAIN CONTENT FLOW ----------------------------
 if st.session_state.page == "Bracket Generator":
     st.title("🎮 Smash Bracket — Regular & Teams")
 else:
     st.title("🗂️ Round Robin Scheduler & Leaderboard")
-    
-# Use st.session_state.players_list for consistent access outside the sidebar
-players = st.session_state.players_list
 
+players = st.session_state.players_list
 
 if st.session_state.page == "Round Robin":
     show_round_robin_page(players)
 
-else: # Bracket Generator Content 
+else:
     # ---------------------------- Table helpers ----------------------------
     def build_entries_df(players: List[str], k: int) -> pd.DataFrame:
         rows = []
@@ -493,15 +626,15 @@ else: # Bracket Generator Content
         return out
 
     def df_to_entries(df: pd.DataFrame, clean_rows_flag: bool) -> List[Entry]:
-        entries: List[Entry] = []
+        entries_local: List[Entry] = []
         for _, row in df.iterrows():
             pl = str(row.get("Player", "")).strip()
             ch = str(row.get("Character", "")).strip()
             if clean_rows_flag and (not pl or not ch):
                 continue
             if pl and ch:
-                entries.append(Entry(player=pl, character=ch))
-        return entries
+                entries_local.append(Entry(player=pl, character=ch))
+        return entries_local
 
     # ---------------------------- State & editor ----------------------------
     if "table_df" not in st.session_state:
@@ -532,7 +665,6 @@ else: # Bracket Generator Content
             lambda p: p if p in players else (players[0] if p == "" else p)
         )
 
-    # --- START OF BRACKET GENERATOR VISIBLE CONTENT ---
     st.subheader("Entries")
     table_df = st.data_editor(
         st.session_state.table_df,
@@ -558,19 +690,26 @@ else: # Bracket Generator Content
         prev = rounds[0]
 
         def winner_of_pair(pair_index: int, pairs_list: List[Tuple[Optional[Entry], Optional[Entry]]]) -> Optional[Entry]:
-            if pair_index >= len(pairs_list): return None
+            if pair_index >= len(pairs_list):
+                return None
             a, b = pairs_list[pair_index]
-            if a is None and b is None: return None
-            if a is None: return b if (b and b.character.upper() != "BYE") else None
-            if b is None: return a if (a and a.character.upper() != "BYE") else None
-            if a.character.upper() == "BYE" and b.character.upper() != "BYE": return b
-            if b.character.upper() == "BYE" and a.character.upper() != "BYE": return a
+            if a is None and b is None:
+                return None
+            if a is None:
+                return b if (b and b.character.upper() != "BYE") else None
+            if b is None:
+                return a if (a and a.character.upper() != "BYE") else None
+            if a.character.upper() == "BYE" and b.character.upper() != "BYE":
+                return b
+            if b.character.upper() == "BYE" and a.character.upper() != "BYE":
+                return a
 
-            # Only R1 has explicit selections
             label_a, label_b = entry_to_label(a), entry_to_label(b)
             sel = winners_map.get(pair_index + 1, "")
-            if sel == label_a: return a
-            if sel == label_b: return b
+            if sel == label_a:
+                return a
+            if sel == label_b:
+                return b
             return None
 
         for _ in range(1, num_rounds):
@@ -592,12 +731,11 @@ else: # Bracket Generator Content
         for round_idx, round_pairs in enumerate(all_rounds):
             with cols[round_idx]:
                 st.markdown(f"<div class='round-title'>Round {round_idx+1}</div>", unsafe_allow_html=True)
-                player_colors: Dict[str, str] = {}
                 for pair in round_pairs:
                     a, b = pair
                     st.markdown("<div class='match-box'>", unsafe_allow_html=True)
-                    st.markdown(render_entry_line(a, team_of, team_colors, player_colors), unsafe_allow_html=True)
-                    st.markdown(render_entry_line(b, team_of, team_colors, player_colors), unsafe_allow_html=True)
+                    st.markdown(render_entry_line(a, team_of, team_colors), unsafe_allow_html=True)
+                    st.markdown(render_entry_line(b, team_of, team_colors), unsafe_allow_html=True)
                     st.markdown("</div>", unsafe_allow_html=True)
 
     def r1_winner_controls(r1_pairs: List[Tuple[Entry, Entry]]):
@@ -608,9 +746,12 @@ else: # Bracket Generator Content
             label_a = entry_to_label(a)
             label_b = entry_to_label(b)
             prev = st.session_state.r1_winners.get(i, "")
-            if prev == label_a: idx = 0
-            elif prev == label_b: idx = 1
-            else: idx = 2
+            if prev == label_a:
+                idx = 0
+            elif prev == label_b:
+                idx = 1
+            else:
+                idx = 2
             choice = st.radio(
                 f"Match {i}",
                 options=[label_a, label_b, "(undecided)"],
@@ -629,11 +770,11 @@ else: # Bracket Generator Content
             if len(entries) < 2:
                 st.error("Add at least 2 entries (characters).")
             else:
+                final_order = st.session_state.player_order_final or players
                 if rule == "regular":
-                    bracket = generate_bracket_regular(entries)
-                # Corrected: Use '#' for Python comments
-                else:  # teams
-                    bracket = generate_bracket_teams(entries, team_of)
+                    bracket = generate_bracket_regular(entries, table_df, final_order)
+                else:
+                    bracket = generate_bracket_teams(entries, team_of, table_df, final_order)
 
                 if not bracket:
                     st.error("Couldn't build a valid round-1 bracket with those constraints.")
@@ -648,8 +789,6 @@ else: # Bracket Generator Content
                     st.session_state["last_team_of"] = team_of if rule == "teams" else {}
                     st.session_state["last_team_colors"] = team_colors if rule == "teams" else {}
 
-    # Corrected: Use '#' for Python comments
-    # Persist & render compact full bracket
     if "last_bracket" in st.session_state and st.session_state["last_bracket"]:
         r1_pairs = st.session_state["last_bracket"]
         if st.session_state.get("last_rule") == "teams":
@@ -668,5 +807,4 @@ else: # Bracket Generator Content
             st.session_state.pop("r1_winners", None)
             st.rerun()
 
-    st.caption("Regular uses balanced randomization; Teams forbids same-team R1. Add an 'images/' folder with character PNGs to show icons.")
-    # --- END OF BRACKET GENERATOR VISIBLE CONTENT ---
+    st.caption("Regular/Teams now use: random player draw → optional manual reorder → A/B/C tiering → weighted pairing (40/20/20) with removal. Add an 'images/' folder with character PNGs to show icons.")
