@@ -211,45 +211,22 @@ def generate_bracket_hierarchical_weighted(
     team_mode: bool = False,
     team_of: Optional[Dict[str, str]] = None,
     df_table: Optional[pd.DataFrame] = None,
-    player_order_final: Optional[List[str]] = None
+    player_order_final: Optional[List[str]] = None,
+    max_attempts: int = 200
 ) -> List[Tuple[Entry, Entry]]:
-    """
-    Implements the user's Project Spec:
-      Phase 1: player order provided via UI (already random + optional manual override)
-      Phase 2: auto categorize entries into A/B/C
-      Phase 3: pairing with:
-        - first pick: pure random from remaining pool
-        - second pick: weighted 40/20/20 by category relative to first pick
-      Phase 4: remove both entries immediately, repeat until bracket filled
-    Constraints kept:
-      - no self-match (same player vs same player)
-      - teams mode: forbid same-team matchups in round 1
-      - BYEs fill to next power of two; BYE always paired with a real entry (no BYE vs BYE)
-    """
     team_of = team_of or {}
     base = [e for e in entries if e.player != "SYSTEM" and e.character.strip()]
     if len(base) < 2:
         return []
 
-    # BYE handling
-    need_byes = byes_needed(len(base))
-    remaining: List[Entry] = base.copy()
-    random.shuffle(remaining)
+    bye_entry = Entry("SYSTEM", "BYE")
+    byes_budget = byes_needed(len(base))
+    target = next_power_of_two(len(base))
+    target_pairs = target // 2
 
-    pairs: List[Tuple[Entry, Entry]] = []
-
-    # Phase 2 categories for real entries (BYEs not categorized)
     final_order = player_order_final or sorted({e.player for e in base})
     cat_map = categorize_entries_ABC(base, final_order, df_table if df_table is not None else pd.DataFrame())
 
-    # Pre-assign BYEs: pair BYE with random real entries
-    bye_entry = Entry("SYSTEM", "BYE")
-    while need_byes > 0 and remaining:
-        a = remaining.pop()  # random-ish because list was shuffled
-        pairs.append((a, bye_entry))
-        need_byes -= 1
-
-    # Now do the weighted pairing among remaining real entries
     def allowed(a: Entry, b: Entry) -> bool:
         if a.player == b.player:
             return False
@@ -260,56 +237,75 @@ def generate_bracket_hierarchical_weighted(
                 return False
         return True
 
-    # weights: same=0.4, other two cats=0.2 each (re-normalized over available candidates)
-    while len(remaining) >= 2:
-        first = random.choice(remaining)  # Phase 3: First Pick is pure random
-        remaining.remove(first)
-
-        first_cat = cat_map.get(first, "B")
-
-        candidates = [x for x in remaining if allowed(first, x)]
+    def weighted_second_pick(first: Entry, candidates: List[Entry]) -> Optional[Entry]:
         if not candidates:
-            # Can't find an opponent under constraints: put first back and reshuffle,
-            # and if it still can't work, break out.
-            remaining.append(first)
-            random.shuffle(remaining)
-            # try a different first next loop; but if stuck, we eventually stop
-            stuck_check = 0
-            for _ in range(8):
-                test_first = random.choice(remaining)
-                test_candidates = [x for x in remaining if x != test_first and allowed(test_first, x)]
-                if test_candidates:
-                    stuck_check = 1
-                    break
-            if not stuck_check:
-                break
-            continue
-
+            return None
+        first_cat = cat_map.get(first, "B")
         weights = []
         for c in candidates:
             c_cat = cat_map.get(c, "B")
-            if c_cat == first_cat:
-                weights.append(0.4)
-            else:
-                weights.append(0.2)
+            weights.append(0.4 if c_cat == first_cat else 0.2)
+        return random.choices(candidates, weights=weights, k=1)[0]
 
-        second = weighted_pick(candidates, weights)
-        if second is None:
-            remaining.append(first)
-            random.shuffle(remaining)
-            continue
+    best: List[Tuple[Entry, Entry]] = []
+    best_score = (-1, -10**9)  # (num_non_bye_pairs, -num_violations_guess)
 
-        # Phase 4: removal (permanent for this bracket generation)
-        remaining.remove(second)
-        pairs.append((first, second))
+    for _ in range(max_attempts):
+        remaining = base.copy()
+        random.shuffle(remaining)
 
-    # If odd leftover (can happen if constraints block matching), give it a BYE if that still makes sense
-    if remaining:
-        pairs.append((remaining[0], bye_entry))
+        pairs: List[Tuple[Entry, Entry]] = []
+        byes_left = byes_budget
 
-    # Ensure bracket size matches power-of-two target (pairs count = target/2)
-    # If we ended early due to constraints, we may be short. We'll just return what we have.
-    return pairs
+        # Assign BYEs first (never exceed budget)
+        while byes_left > 0 and remaining:
+            a = remaining.pop()
+            pairs.append((a, bye_entry))
+            byes_left -= 1
+
+        # Pair the rest with weighted logic
+        stuck_guard = 0
+        while len(remaining) >= 2 and len(pairs) < target_pairs:
+            stuck_guard += 1
+            if stuck_guard > 5000:
+                break
+
+            first = random.choice(remaining)
+            remaining.remove(first)
+
+            candidates = [x for x in remaining if allowed(first, x)]
+            if not candidates:
+                # put it back and try something else
+                remaining.append(first)
+                random.shuffle(remaining)
+                continue
+
+            second = weighted_second_pick(first, candidates)
+            if second is None:
+                remaining.append(first)
+                random.shuffle(remaining)
+                continue
+
+            remaining.remove(second)
+            pairs.append((first, second))
+
+        # If we still have leftover entries, we DO NOT create extra BYEs.
+        # Instead: this attempt is "worse" and we keep searching other attempts.
+
+        # Score attempt:
+        non_bye_pairs = sum(1 for a, b in pairs if a.character.upper() != "BYE" and b.character.upper() != "BYE")
+        score = (non_bye_pairs, -len(remaining))  # prefer more real pairs, fewer leftovers
+        if score > best_score:
+            best_score = score
+            best = pairs
+
+        # If we hit the exact size and no leftovers, we're done
+        if len(best) == target_pairs and len(remaining) == 0:
+            return best
+
+    # Fallback best attempt (usually already good)
+    return best
+
 
 def generate_bracket_regular(entries: List[Entry], df_table: pd.DataFrame, player_order_final: List[str]) -> List[Tuple[Entry, Entry]]:
     return generate_bracket_hierarchical_weighted(
